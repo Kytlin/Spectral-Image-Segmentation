@@ -74,8 +74,8 @@ TEST(Toolchain, SpectraLargestEigenvaluesOfPathLaplacian) {
     }
 }
 
-TEST(SampleData, ShapesPngExistsAndIsPng) {
-    const std::string path = std::string(SEG_SAMPLE_DIR) + "/shapes.png";
+TEST(SampleData, HorseSilhouettePngExistsAndIsPng) {
+    const std::string path = std::string(SEG_SAMPLE_DIR) + "/01_horse_silhouette.png";
     std::ifstream file(path, std::ios::binary);
     ASSERT_TRUE(file) << "missing " << path;
 

@@ -43,7 +43,7 @@ target_compile_options(seg_warnings INTERFACE
   $<$<CXX_COMPILER_ID:GNU,Clang>:-Wall -Wextra -Wpedantic -Wconversion -Wshadow>)
 
 # Sample images shipped with the repo, for tests and the CLI.
-set(SEG_SAMPLE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/data/samples)
+set(SEG_SAMPLE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/data)
 
 # ---- Tests --------------------------------------------------------------------------------
 if(SEG_BUILD_TESTS)
