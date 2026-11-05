@@ -1,0 +1,18 @@
+# Build trees
+build/
+build-*/
+out/
+.cache/
+
+# Editor settings
+.vscode/
+
+# Previous implementation, kept locally for reference only until it is removed
+Image-Spectral-Segmentation_archived/
+
+# Frontend (later stages)
+web/node_modules/
+web/dist/
+
+# Work-in-progress doc
+docs/
