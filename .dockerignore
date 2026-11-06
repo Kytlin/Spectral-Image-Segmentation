@@ -1,0 +1,10 @@
+build/
+build-*/
+out/
+.cache/
+.git/
+.vscode/
+benchmarks/
+docs/
+*.md
+!README.md

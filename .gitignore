@@ -16,3 +16,6 @@ web/dist/
 
 # Work-in-progress doc
 docs/
+
+# Machine-specific clangd config
+.clangd

@@ -15,8 +15,10 @@ endif()
 option(SEG_BUILD_TESTS "Build the unit tests" ON)
 
 # ---- Dependencies -------------------------------------------------------------------------
-# Eigen comes from the system (apt: libeigen3-dev; Ubuntu 24.04 ships 3.4.0).
+# Eigen and OpenCV come from the system
+# (apt: libeigen3-dev libopencv-dev libopencv-contrib-dev; Ubuntu 24.04 ships 3.4.0 / 4.6.0).
 find_package(Eigen3 3.4 REQUIRED NO_MODULE)
+find_package(OpenCV 4 REQUIRED COMPONENTS core imgproc imgcodecs ximgproc)
 
 # Spectra and GoogleTest are fetched at configure time, pinned to a release tarball and
 # verified by SHA-256, so every machine (and the Docker image later) builds the same code.
@@ -43,7 +45,17 @@ target_compile_options(seg_warnings INTERFACE
   $<$<CXX_COMPILER_ID:GNU,Clang>:-Wall -Wextra -Wpedantic -Wconversion -Wshadow>)
 
 # Sample images shipped with the repo, for tests and the CLI.
-set(SEG_SAMPLE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/data)
+set(SEG_DATA_DIR ${CMAKE_CURRENT_SOURCE_DIR}/data)
+
+# ---- Core library -------------------------------------------------------------------------
+# Region graph, spectral clustering (Spectra + OpenCV k-means), and the SLIC pipeline.
+add_library(segcore STATIC src/region_graph.cpp src/spectral.cpp src/segmenter.cpp)
+target_include_directories(segcore PUBLIC src)
+target_include_directories(segcore SYSTEM PUBLIC ${OpenCV_INCLUDE_DIRS})
+target_link_libraries(segcore PUBLIC Eigen3::Eigen Spectra::Spectra ${OpenCV_LIBS} PRIVATE seg_warnings)
+
+add_executable(segment apps/segment.cpp)
+target_link_libraries(segment PRIVATE segcore seg_warnings)
 
 # ---- Tests --------------------------------------------------------------------------------
 if(SEG_BUILD_TESTS)
@@ -58,3 +70,4 @@ if(SEG_BUILD_TESTS)
   enable_testing()
   add_subdirectory(tests)
 endif()
+
