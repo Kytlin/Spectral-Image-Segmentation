@@ -15,12 +15,29 @@ endif()
 option(SEG_BUILD_TESTS "Build the unit tests" ON)
 
 # ---- Dependencies -------------------------------------------------------------------------
-# Eigen comes from the system (apt: libeigen3-dev; Ubuntu 24.04 ships 3.4.0).
+# Eigen and OpenCV come from the system
+# (apt: libeigen3-dev libopencv-dev libopencv-contrib-dev; Ubuntu 24.04 ships 3.4.0 / 4.6.0).
 find_package(Eigen3 3.4 REQUIRED NO_MODULE)
+find_package(OpenCV 4 REQUIRED COMPONENTS core imgproc imgcodecs ximgproc)
 
-# GoogleTest is fetched at configure time, pinned to a release tarball and verified by
-# SHA-256, so every machine (and the Docker image later) builds the same code.
+# Spectra and GoogleTest are fetched at configure time, pinned to a release tarball and
+# verified by SHA-256, so every machine (and the Docker image later) builds the same code.
 include(FetchContent)
+
+# Spectra is header-only; we only need its include directory, not its install/test targets.
+FetchContent_Declare(spectra
+  URL https://github.com/yixuan/spectra/archive/refs/tags/v1.1.0.tar.gz
+  URL_HASH SHA256=d29671e3d1b8036728933cadfddb05668a3cd6133331e91fc4535a9b85bedc79
+  DOWNLOAD_EXTRACT_TIMESTAMP TRUE)
+FetchContent_GetProperties(spectra)
+if(NOT spectra_POPULATED)
+  FetchContent_Populate(spectra)
+endif()
+add_library(spectra INTERFACE)
+add_library(Spectra::Spectra ALIAS spectra)
+# SYSTEM: don't report warnings from headers we don't own.
+target_include_directories(spectra SYSTEM INTERFACE ${spectra_SOURCE_DIR}/include)
+target_link_libraries(spectra INTERFACE Eigen3::Eigen)
 
 # Warning flags shared by every target we own.
 add_library(seg_warnings INTERFACE)
@@ -31,16 +48,14 @@ target_compile_options(seg_warnings INTERFACE
 set(SEG_DATA_DIR ${CMAKE_CURRENT_SOURCE_DIR}/data)
 
 # ---- Core library -------------------------------------------------------------------------
-# Image I/O, colour conversion, preprocessing, SLIC and the region graph. Depends on Eigen only.
-add_library(segcore STATIC
-  src/image_io.cpp src/color.cpp src/preprocess.cpp src/slic.cpp src/region_graph.cpp
-  src/visualize.cpp)
+# Region graph, spectral clustering (Spectra + OpenCV k-means), and the SLIC pipeline.
+add_library(segcore STATIC src/region_graph.cpp src/spectral.cpp src/segmenter.cpp)
 target_include_directories(segcore PUBLIC src)
-target_include_directories(segcore SYSTEM PRIVATE third_party/stb)
-target_link_libraries(segcore PUBLIC Eigen3::Eigen PRIVATE seg_warnings)
+target_include_directories(segcore SYSTEM PUBLIC ${OpenCV_INCLUDE_DIRS})
+target_link_libraries(segcore PUBLIC Eigen3::Eigen Spectra::Spectra ${OpenCV_LIBS} PRIVATE seg_warnings)
 
-add_executable(graph_viz apps/graph_viz.cpp)
-target_link_libraries(graph_viz PRIVATE segcore seg_warnings)
+add_executable(segment apps/segment.cpp)
+target_link_libraries(segment PRIVATE segcore seg_warnings)
 
 # ---- Tests --------------------------------------------------------------------------------
 if(SEG_BUILD_TESTS)

@@ -1,119 +1,118 @@
 #include "region_graph.hpp"
 
+#include <algorithm>
 #include <cmath>
-#include <map>
+#include <cstdint>
 #include <stdexcept>
-#include <utility>
 
 namespace seg {
 
-RegionGraph build_region_graph(const ImageD& lab, const std::vector<int>& labels,
-                               const GraphParams& params) {
-    if (lab.channels != 3 || lab.width <= 0 || lab.height <= 0) {
-        throw std::invalid_argument("build_region_graph: expected a non-empty Lab image");
+int relabel_connected(const cv::Mat& labels, cv::Mat& out) {
+    if (labels.empty() || labels.type() != CV_32S) {
+        throw std::invalid_argument("relabel_connected: expected non-empty CV_32S labels");
     }
-    if (!(params.sigma_color > 0.0)) {
-        throw std::invalid_argument("build_region_graph: sigma_color must be > 0");
-    }
-    const int width = lab.width;
-    const int height = lab.height;
-    const int n = width * height;
-    if (static_cast<int>(labels.size()) != n) {
-        throw std::invalid_argument("build_region_graph: labels.size() != width * height");
-    }
-
-    // Validate labels and count pixels per node.
-    int num_nodes = 0;
-    for (int label : labels) {
-        if (label < 0) {
-            throw std::invalid_argument("build_region_graph: negative label");
-        }
-        num_nodes = std::max(num_nodes, label + 1);
-    }
-    std::vector<int> counts(static_cast<std::size_t>(num_nodes), 0);
-    for (int label : labels) {
-        ++counts[static_cast<std::size_t>(label)];
-    }
-    for (int count : counts) {
-        if (count == 0) {
-            throw std::invalid_argument("build_region_graph: labels must be 0..R-1 with no gaps");
+    const int rows = labels.rows;
+    const int cols = labels.cols;
+    out = cv::Mat(rows, cols, CV_32S, cv::Scalar(-1));
+    std::vector<cv::Point> stack;
+    int next_id = 0;
+    for (int y = 0; y < rows; ++y) {
+        for (int x = 0; x < cols; ++x) {
+            if (out.at<int>(y, x) != -1) continue;
+            const int value = labels.at<int>(y, x);
+            out.at<int>(y, x) = next_id;
+            stack.assign(1, cv::Point(x, y));
+            while (!stack.empty()) {
+                const cv::Point p = stack.back();
+                stack.pop_back();
+                const cv::Point nbrs[4] = {{p.x + 1, p.y}, {p.x - 1, p.y}, {p.x, p.y + 1}, {p.x, p.y - 1}};
+                for (const cv::Point& q : nbrs) {
+                    if (q.x < 0 || q.y < 0 || q.x >= cols || q.y >= rows) continue;
+                    if (out.at<int>(q) != -1 || labels.at<int>(q) != value) continue;
+                    out.at<int>(q) = next_id;
+                    stack.push_back(q);
+                }
+            }
+            ++next_id;
         }
     }
+    return next_id;
+}
 
-    RegionGraph graph;
-    graph.width = width;
-    graph.height = height;
-    graph.pixel_to_node = labels;
-
-    // node -> pixels, as a CSR-style list (counting sort, so pixels stay in ascending order).
-    graph.node_offsets.assign(static_cast<std::size_t>(num_nodes) + 1, 0);
-    for (int i = 0; i < num_nodes; ++i) {
-        graph.node_offsets[static_cast<std::size_t>(i) + 1] =
-            graph.node_offsets[static_cast<std::size_t>(i)] + counts[static_cast<std::size_t>(i)];
+RegionGraph build_region_graph(const cv::Mat& lab, const cv::Mat& labels, const GraphParams& params) {
+    if (lab.empty() || lab.type() != CV_32FC3) {
+        throw std::invalid_argument("build_region_graph: expected a non-empty CV_32FC3 Lab image");
     }
-    graph.node_pixels.assign(static_cast<std::size_t>(n), 0);
-    std::vector<int> cursor(graph.node_offsets.begin(), graph.node_offsets.end() - 1);
-    for (int p = 0; p < n; ++p) {
-        const auto node = static_cast<std::size_t>(labels[static_cast<std::size_t>(p)]);
-        graph.node_pixels[static_cast<std::size_t>(cursor[node]++)] = p;
+    if (labels.type() != CV_32S || labels.size() != lab.size()) {
+        throw std::invalid_argument("build_region_graph: labels must be CV_32S, same size as image");
     }
+    if (!(params.sigma_color > 0.0) || !(params.edge_floor >= 0.0)) {
+        throw std::invalid_argument("build_region_graph: need sigma_color > 0 and edge_floor >= 0");
+    }
+    double min_label = 0.0;
+    double max_label = 0.0;
+    cv::minMaxLoc(labels, &min_label, &max_label);
+    if (min_label < 0.0) throw std::invalid_argument("build_region_graph: negative label");
+    const int n = static_cast<int>(max_label) + 1;
+    const int rows = lab.rows;
+    const int cols = lab.cols;
 
-    // Per-region statistics: pixel count, centroid, mean Lab colour.
-    graph.regions.assign(static_cast<std::size_t>(num_nodes), Region{});
-    for (int y = 0; y < height; ++y) {
-        for (int x = 0; x < width; ++x) {
-            Region& r = graph.regions[static_cast<std::size_t>(labels[static_cast<std::size_t>(y * width + x)])];
+    RegionGraph g;
+    g.labels = labels.clone();
+    g.regions.assign(static_cast<std::size_t>(n), RegionFeatures{});
+    for (int y = 0; y < rows; ++y) {
+        const int* lrow = labels.ptr<int>(y);
+        const cv::Vec3f* crow = lab.ptr<cv::Vec3f>(y);
+        for (int x = 0; x < cols; ++x) {
+            RegionFeatures& r = g.regions[static_cast<std::size_t>(lrow[x])];
             ++r.pixel_count;
             r.centroid_x += x;
             r.centroid_y += y;
-            for (std::size_t c = 0; c < 3; ++c) {
-                r.mean_lab[c] += lab.at(x, y, static_cast<int>(c));
-            }
+            for (int c = 0; c < 3; ++c) r.mean_lab[static_cast<std::size_t>(c)] += crow[x][c];
         }
     }
-    for (Region& r : graph.regions) {
+    for (RegionFeatures& r : g.regions) {
+        if (r.pixel_count == 0) {
+            throw std::invalid_argument("build_region_graph: labels must be 0..n-1 with no gaps");
+        }
         const double inv = 1.0 / r.pixel_count;
         r.centroid_x *= inv;
         r.centroid_y *= inv;
-        for (double& v : r.mean_lab) {
-            v *= inv;
-        }
+        for (double& v : r.mean_lab) v *= inv;
     }
 
-    // Adjacency: visit every 4-neighbour pixel pair once (right and down neighbours) and
-    // count, for each pair of different labels, how many such pixel pairs they share.
-    std::map<std::pair<int, int>, int> boundary;  // ordered -> deterministic edge order
-    for (int y = 0; y < height; ++y) {
-        for (int x = 0; x < width; ++x) {
-            const int a = labels[static_cast<std::size_t>(y * width + x)];
-            if (x + 1 < width) {
-                const int b = labels[static_cast<std::size_t>(y * width + x + 1)];
-                if (a != b) {
-                    ++boundary[{std::min(a, b), std::max(a, b)}];
-                }
-            }
-            if (y + 1 < height) {
-                const int b = labels[static_cast<std::size_t>((y + 1) * width + x)];
-                if (a != b) {
-                    ++boundary[{std::min(a, b), std::max(a, b)}];
-                }
-            }
+    // Packed (a, b) keys of differing 4-neighbours; sorting then run-length counting gives
+    // deterministic edges and boundary lengths.
+    std::vector<std::uint64_t> pairs;
+    const auto pack = [](int a, int b) {
+        const auto lo = static_cast<std::uint64_t>(std::min(a, b));
+        const auto hi = static_cast<std::uint64_t>(std::max(a, b));
+        return (lo << 32U) | hi;
+    };
+    for (int y = 0; y < rows; ++y) {
+        const int* lrow = labels.ptr<int>(y);
+        const int* next_row = y + 1 < rows ? labels.ptr<int>(y + 1) : nullptr;
+        for (int x = 0; x < cols; ++x) {
+            if (x + 1 < cols && lrow[x] != lrow[x + 1]) pairs.push_back(pack(lrow[x], lrow[x + 1]));
+            if (next_row != nullptr && lrow[x] != next_row[x]) pairs.push_back(pack(lrow[x], next_row[x]));
         }
     }
+    std::sort(pairs.begin(), pairs.end());
 
-    graph.sigma_spatial =
-        params.spatial_scale > 0.0 ? params.spatial_scale * std::sqrt(static_cast<double>(n) / num_nodes)
-                                   : 0.0;
-    const double inv_two_sigma_color_sq = 1.0 / (2.0 * params.sigma_color * params.sigma_color);
-    const double inv_two_sigma_spatial_sq =
-        graph.sigma_spatial > 0.0 ? 1.0 / (2.0 * graph.sigma_spatial * graph.sigma_spatial) : 0.0;
+    const double pixels = static_cast<double>(rows) * cols;
+    g.sigma_spatial = params.spatial_scale > 0.0 ? params.spatial_scale * std::sqrt(pixels / n) : 0.0;
+    const double inv_color = 1.0 / (2.0 * params.sigma_color * params.sigma_color);
+    const double inv_spatial =
+        g.sigma_spatial > 0.0 ? 1.0 / (2.0 * g.sigma_spatial * g.sigma_spatial) : 0.0;
 
     std::vector<Eigen::Triplet<double>> triplets;
-    triplets.reserve(boundary.size() * 2);
-    graph.edges.reserve(boundary.size());
-    for (const auto& [key, length] : boundary) {
-        const Region& ra = graph.regions[static_cast<std::size_t>(key.first)];
-        const Region& rb = graph.regions[static_cast<std::size_t>(key.second)];
+    for (std::size_t i = 0; i < pairs.size();) {
+        std::size_t j = i;
+        while (j < pairs.size() && pairs[j] == pairs[i]) ++j;
+        const int a = static_cast<int>(pairs[i] >> 32U);
+        const int b = static_cast<int>(pairs[i] & 0xffffffffU);
+        const RegionFeatures& ra = g.regions[static_cast<std::size_t>(a)];
+        const RegionFeatures& rb = g.regions[static_cast<std::size_t>(b)];
         double color_sq = 0.0;
         for (std::size_t c = 0; c < 3; ++c) {
             const double d = ra.mean_lab[c] - rb.mean_lab[c];
@@ -121,56 +120,57 @@ RegionGraph build_region_graph(const ImageD& lab, const std::vector<int>& labels
         }
         const double dx = ra.centroid_x - rb.centroid_x;
         const double dy = ra.centroid_y - rb.centroid_y;
-        const double spatial_sq = dx * dx + dy * dy;
-        const double weight =
-            std::exp(-color_sq * inv_two_sigma_color_sq - spatial_sq * inv_two_sigma_spatial_sq);
-
-        graph.edges.push_back({key.first, key.second, length, std::sqrt(color_sq),
-                               std::sqrt(spatial_sq), weight});
-        triplets.emplace_back(key.first, key.second, weight);
-        triplets.emplace_back(key.second, key.first, weight);
+        const double w = std::exp(-color_sq * inv_color - (dx * dx + dy * dy) * inv_spatial) +
+                         params.edge_floor;
+        g.edges.push_back({a, b, static_cast<int>(j - i), w});
+        triplets.emplace_back(a, b, w);
+        triplets.emplace_back(b, a, w);
+        i = j;
     }
-    graph.affinity.resize(num_nodes, num_nodes);
-    graph.affinity.setFromTriplets(triplets.begin(), triplets.end());
-    return graph;
+    g.affinity.resize(n, n);
+    g.affinity.setFromTriplets(triplets.begin(), triplets.end());
+    g.affinity.makeCompressed();
+    return g;
 }
 
-Eigen::VectorXd node_degrees(const SparseMatrix& affinity) {
-    Eigen::VectorXd degrees = Eigen::VectorXd::Zero(affinity.rows());
-    for (int col = 0; col < affinity.outerSize(); ++col) {
-        for (SparseMatrix::InnerIterator it(affinity, col); it; ++it) {
-            degrees(it.row()) += it.value();
-        }
+Eigen::VectorXd node_degrees(const SparseMatrix& w) {
+    Eigen::VectorXd d = Eigen::VectorXd::Zero(w.rows());
+    for (int col = 0; col < w.outerSize(); ++col) {
+        for (SparseMatrix::InnerIterator it(w, col); it; ++it) d(it.row()) += it.value();
     }
-    return degrees;
+    return d;
 }
 
-int count_connected_components(const SparseMatrix& affinity) {
-    const auto n = static_cast<int>(affinity.rows());
-    std::vector<int> component(static_cast<std::size_t>(n), -1);
+int connected_components(const SparseMatrix& w, std::vector<int>* component) {
+    const auto n = static_cast<int>(w.rows());
+    std::vector<int> comp(static_cast<std::size_t>(n), -1);
     std::vector<int> stack;
     int count = 0;
     for (int start = 0; start < n; ++start) {
-        if (component[static_cast<std::size_t>(start)] != -1) {
-            continue;
-        }
-        component[static_cast<std::size_t>(start)] = count;
+        if (comp[static_cast<std::size_t>(start)] != -1) continue;
+        comp[static_cast<std::size_t>(start)] = count;
         stack.assign(1, start);
         while (!stack.empty()) {
             const int node = stack.back();
             stack.pop_back();
-            // Column `node` of a symmetric W lists node's neighbours.
-            for (SparseMatrix::InnerIterator it(affinity, node); it; ++it) {
-                const auto next = static_cast<int>(it.row());
-                if (it.value() != 0.0 && component[static_cast<std::size_t>(next)] == -1) {
-                    component[static_cast<std::size_t>(next)] = count;
-                    stack.push_back(next);
+            for (SparseMatrix::InnerIterator it(w, node); it; ++it) {
+                const auto next = static_cast<std::size_t>(it.row());
+                if (it.value() != 0.0 && comp[next] == -1) {
+                    comp[next] = count;
+                    stack.push_back(static_cast<int>(next));
                 }
             }
         }
         ++count;
     }
+    if (component != nullptr) *component = std::move(comp);
     return count;
+}
+
+std::size_t estimate_sparse_bytes(const SparseMatrix& m) {
+    const auto nnz = static_cast<std::size_t>(m.nonZeros());
+    return nnz * (sizeof(double) + sizeof(SparseMatrix::StorageIndex)) +
+           (static_cast<std::size_t>(m.outerSize()) + 1) * sizeof(SparseMatrix::StorageIndex);
 }
 
 }  // namespace seg
