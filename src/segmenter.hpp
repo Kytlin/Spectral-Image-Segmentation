@@ -85,7 +85,38 @@ struct SegmentationResult {
     StageTimings timings;
 };
 
+// Everything before spectral clustering: working image, SLIC superpixels and the region
+// graph. Depends only on the image and the graph parameters (see graph_cache_key), and is
+// never modified after construction, so it can be shared across threads and requests.
+struct PreparedGraph {
+    bool ok = false;
+    std::string status;  // "invalid_image" / "invalid_superpixels" when !ok
+    std::string message;
+    cv::Mat image;
+    cv::Mat superpixel_labels;  // same buffer as graph.labels
+    int superpixels_actual = 0;
+    RegionGraph graph;
+    StageTimings timings;  // preprocess, slic, graph and their total; eigen/kmeans are 0
+
+    // Approximate heap footprint, for cache accounting.
+    std::size_t bytes() const;
+};
+
+PreparedGraph prepare_graph(const cv::Mat& bgr, const SegmentParams& params);
+
+// Spectral clustering on a prepared graph. Its timings cover only this call: the
+// preprocess/slic/graph stages are 0 unless charge_graph_timings adds them.
+SegmentationResult segment_graph(const PreparedGraph& prepared, const SegmentParams& params);
+
+// Attributes the graph-building stage times to r, for a result that built its own graph.
+void charge_graph_timings(SegmentationResult& r, const StageTimings& graph);
+
+// prepare_graph + segment_graph + charge_graph_timings.
 SegmentationResult segment(const cv::Mat& bgr, const SegmentParams& params);
+
+// Identifies a PreparedGraph: the image's source id plus exactly the parameters that
+// prepare_graph reads. Spectral parameters (method, k, ncut, seed, ...) are excluded.
+std::string graph_cache_key(const std::string& source_id, const SegmentParams& params);
 
 // The image segment() works on: bgr shrunk so its long side is at most max_dim (0 = as is).
 cv::Mat working_image(const cv::Mat& bgr, int max_dim);

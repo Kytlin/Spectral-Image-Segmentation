@@ -19,6 +19,7 @@
 #include "api/codec.hpp"
 #include "api/ids.hpp"
 #include "db/database.hpp"
+#include "graph_cache.hpp"
 #include "segmenter.hpp"
 
 #include <httplib.h>
@@ -105,7 +106,11 @@ void create_run(const httplib::Request& req, httplib::Response& res, db::Databas
     send_data(res, 201, run_to_json(run), t0);
 }
 
-void create_result(const httplib::Request& req, httplib::Response& res, db::Database& db) {
+struct RunNotFound : std::runtime_error {
+    explicit RunNotFound(const std::string& id) : std::runtime_error("no run with id " + id) {}
+};
+
+void create_result(const httplib::Request& req, httplib::Response& res, db::Database& db, GraphCache& cache) {
     const auto t0 = Clock::now();
     const std::string run_id = req.matches[1];
     if (!has_json_content_type(req)) {
@@ -124,15 +129,27 @@ void create_result(const httplib::Request& req, httplib::Response& res, db::Data
         send_error(res, 400, "invalid_parameter", e.what(), {{"field", e.field()}});
         return;
     }
-    const std::optional<std::string> encoded = db.run_image(run_id);
-    if (!encoded) {
+    // The graph depends only on the run's (immutable) image and the graph parameters, so it
+    // is shared by every request that differs only in spectral parameters (k, method, ...).
+    const auto lookup_start = Clock::now();
+    GraphCache::Lookup lookup;
+    try {
+        lookup = cache.get_or_build(graph_cache_key(run_id, params), [&db, &run_id, &params] {
+            const std::optional<std::string> encoded = db.run_image(run_id);
+            if (!encoded) throw RunNotFound(run_id);
+            const cv::Mat bgr = decode_image(*encoded);
+            if (bgr.empty()) throw std::runtime_error("stored image of run " + run_id + " does not decode");
+            return prepare_graph(bgr, params);
+        });
+    } catch (const RunNotFound&) {
         send_error(res, 404, "run_not_found", "no run with id " + run_id);
         return;
     }
-    const cv::Mat bgr = decode_image(*encoded);
-    if (bgr.empty()) throw std::runtime_error("stored image of run " + run_id + " does not decode");
+    const double lookup_ms = std::chrono::duration<double, std::milli>(Clock::now() - lookup_start).count();
 
-    const SegmentationResult output = segment(bgr, params);
+    SegmentationResult output = segment_graph(*lookup.graph, params);
+    // Only a result that built its graph is charged for building it.
+    if (lookup.outcome == CacheOutcome::Miss) charge_graph_timings(output, lookup.graph->timings);
     if (!output.ok) {
         send_error(res, 422, "segmentation_failed", output.message.empty() ? output.status : output.message,
                    {{"status", output.status}, {"metrics", metrics_to_json(output)}});
@@ -142,7 +159,16 @@ void create_result(const httplib::Request& req, httplib::Response& res, db::Data
     row.id = new_uuid();
     row.run_id = run_id;
     row.params_json = params_to_json(params).dump();
-    row.metrics_json = metrics_to_json(output).dump();
+    json metrics = metrics_to_json(output);
+    metrics["cache"] = {
+        {"graph", to_string(lookup.outcome)},
+        // Wall time this request spent obtaining the graph: building it (miss), finding it
+        // (hit) or waiting for a concurrent build (shared).
+        {"lookup_ms", lookup_ms},
+        // What building this graph cost when it was built; for a miss, this request paid it.
+        {"graph_build_ms", lookup.graph->timings.total_ms},
+    };
+    row.metrics_json = metrics.dump();
     row.superpixel_labels_png = encode_label_png(output.superpixel_labels);
     row.region_labels_png = encode_label_png(output.region_map);
     const std::optional<db::ResultRecord> stored = db.insert_result(row);
@@ -209,9 +235,16 @@ void list_experiments(const httplib::Request& req, httplib::Response& res, db::D
     send_data(res, 200, {{"experiments", items}, {"count", items.size()}}, t0);
 }
 
+json cache_stats_json(const CacheStats& s) {
+    return {{"entries", s.entries},   {"max_entries", s.max_entries},
+            {"bytes", s.bytes},       {"capacity_bytes", s.capacity_bytes},
+            {"hits", s.hits},         {"shared", s.shared}, {"misses", s.misses},
+            {"evictions", s.evictions}};
+}
+
 }  // namespace
 
-void register_routes(httplib::Server& server, db::Database& db, const ApiLimits& limits) {
+void register_routes(httplib::Server& server, db::Database& db, GraphCache& cache, const ApiLimits& limits) {
     // Leaves room for multipart framing around a maximal image.
     server.set_payload_max_length(limits.max_upload_bytes + (64u << 10));
 
@@ -231,7 +264,19 @@ void register_routes(httplib::Server& server, db::Database& db, const ApiLimits&
         else send_error(res, 404, "run_not_found", "no run with id " + id);
     });
     server.Post("/api/runs/" + kUuid + "/results",
-                [&db](const httplib::Request& req, httplib::Response& res) { create_result(req, res, db); });
+                [&db, &cache](const httplib::Request& req, httplib::Response& res) {
+                    create_result(req, res, db, cache);
+                });
+    server.Get("/api/cache", [&cache](const httplib::Request&, httplib::Response& res) {
+        send_data(res, 200, cache_stats_json(cache.stats()), Clock::now());
+    });
+    // Explicit invalidation. Entries never go stale (runs are immutable and the key holds
+    // every graph parameter), so this only frees memory; in-flight computations keep their graph.
+    server.Delete("/api/cache", [&cache](const httplib::Request&, httplib::Response& res) {
+        const auto t0 = Clock::now();
+        cache.clear();
+        send_data(res, 200, cache_stats_json(cache.stats()), t0);
+    });
     server.Get("/api/results/" + kUuid, [&db](const httplib::Request& req, httplib::Response& res) {
         const auto t0 = Clock::now();
         const std::string id = req.matches[1];
@@ -255,6 +300,12 @@ void register_routes(httplib::Server& server, db::Database& db, const ApiLimits&
     });
     server.Get("/api/experiments",
                [&db](const httplib::Request& req, httplib::Response& res) { list_experiments(req, res, db); });
+    // Clears the experiment log: permanently deletes every saved result (rows and label maps).
+    // Unsaved results, runs and the graph cache are untouched. Repeating it deletes nothing.
+    server.Delete("/api/experiments", [&db](const httplib::Request&, httplib::Response& res) {
+        const auto t0 = Clock::now();
+        send_data(res, 200, {{"deleted", db.delete_saved()}}, t0);
+    });
     server.Get("/api/experiments/" + kUuid, [&db](const httplib::Request& req, httplib::Response& res) {
         const auto t0 = Clock::now();
         const std::string id = req.matches[1];

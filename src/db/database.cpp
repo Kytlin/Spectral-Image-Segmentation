@@ -279,6 +279,11 @@ SaveReply Database::save_result(const std::string& id) {
     return reply;
 }
 
+std::size_t Database::delete_saved() {
+    const PgResult r = pool_->exec("DELETE FROM results WHERE saved_at IS NOT NULL", {});
+    return std::stoul(PQcmdTuples(r.get()));
+}
+
 std::vector<ResultRecord> Database::list_saved(int limit, const std::optional<std::string>& run_id) {
     const std::string lim = std::to_string(limit);
     const PgResult r = pool_->exec(
