@@ -94,4 +94,12 @@ cv::Mat render_label_colors(const cv::Mat& labels, const cv::Scalar& border = cv
 cv::Mat render_segment_tint(const cv::Mat& bgr, const cv::Mat& labels, double alpha = 0.35,
                             const cv::Scalar& border = cv::Scalar(30, 30, 30));
 
+// The output images shared by the CLI and the HTTP API.
+enum class OutputImage { Original, Superpixels, Segmentation, Boundaries };
+inline constexpr OutputImage kOutputImages[] = {OutputImage::Original, OutputImage::Superpixels,
+                                                OutputImage::Segmentation, OutputImage::Boundaries};
+const char* to_string(OutputImage which);
+// Empty when unavailable: no superpixels yet, or segmentation/boundaries of a failed result.
+cv::Mat render_output(const SegmentationResult& r, OutputImage which);
+
 }  // namespace seg

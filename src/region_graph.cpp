@@ -3,37 +3,46 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <cstddef>
 #include <stdexcept>
+#include <vector>
 
 namespace seg {
+
+namespace {
+
+// Breadth-first flood fill: writes id into out for every pixel 4-connected to seed through
+// pixels with the seed's label. queue is caller-owned scratch, used as a FIFO via a head
+// index so its storage is contiguous and reused across components.
+void bfs_fill_component(const cv::Mat& labels, cv::Mat& out, const cv::Point& seed, int id,
+                        std::vector<cv::Point>& queue) {
+    const int value = labels.at<int>(seed);
+    out.at<int>(seed) = id;
+    queue.assign(1, seed);
+    for (std::size_t head = 0; head < queue.size(); ++head) {
+        const cv::Point p = queue[head];
+        const cv::Point nbrs[4] = {{p.x + 1, p.y}, {p.x - 1, p.y}, {p.x, p.y + 1}, {p.x, p.y - 1}};
+        for (const cv::Point& q : nbrs) {
+            if (q.x < 0 || q.y < 0 || q.x >= labels.cols || q.y >= labels.rows) continue;
+            if (out.at<int>(q) != -1 || labels.at<int>(q) != value) continue;
+            out.at<int>(q) = id;  // marked on enqueue, so each pixel enters the queue once
+            queue.push_back(q);
+        }
+    }
+}
+
+}  // namespace
 
 int relabel_connected(const cv::Mat& labels, cv::Mat& out) {
     if (labels.empty() || labels.type() != CV_32S) {
         throw std::invalid_argument("relabel_connected: expected non-empty CV_32S labels");
     }
-    const int rows = labels.rows;
-    const int cols = labels.cols;
-    out = cv::Mat(rows, cols, CV_32S, cv::Scalar(-1));
-    std::vector<cv::Point> stack;
+    out = cv::Mat(labels.rows, labels.cols, CV_32S, cv::Scalar(-1));
+    std::vector<cv::Point> queue;
     int next_id = 0;
-    for (int y = 0; y < rows; ++y) {
-        for (int x = 0; x < cols; ++x) {
-            if (out.at<int>(y, x) != -1) continue;
-            const int value = labels.at<int>(y, x);
-            out.at<int>(y, x) = next_id;
-            stack.assign(1, cv::Point(x, y));
-            while (!stack.empty()) {
-                const cv::Point p = stack.back();
-                stack.pop_back();
-                const cv::Point nbrs[4] = {{p.x + 1, p.y}, {p.x - 1, p.y}, {p.x, p.y + 1}, {p.x, p.y - 1}};
-                for (const cv::Point& q : nbrs) {
-                    if (q.x < 0 || q.y < 0 || q.x >= cols || q.y >= rows) continue;
-                    if (out.at<int>(q) != -1 || labels.at<int>(q) != value) continue;
-                    out.at<int>(q) = next_id;
-                    stack.push_back(q);
-                }
-            }
-            ++next_id;
+    for (int y = 0; y < labels.rows; ++y) {
+        for (int x = 0; x < labels.cols; ++x) {
+            if (out.at<int>(y, x) == -1) bfs_fill_component(labels, out, cv::Point(x, y), next_id++, queue);
         }
     }
     return next_id;

@@ -259,4 +259,27 @@ cv::Mat render_segment_tint(const cv::Mat& bgr, const cv::Mat& labels, double al
     return render_label_boundaries(out, labels, border);
 }
 
+const char* to_string(OutputImage which) {
+    switch (which) {
+        case OutputImage::Original: return "original";
+        case OutputImage::Superpixels: return "superpixels";
+        case OutputImage::Segmentation: return "segmentation";
+        case OutputImage::Boundaries: return "boundaries";
+    }
+    return "unknown";
+}
+
+cv::Mat render_output(const SegmentationResult& r, OutputImage which) {
+    const cv::Scalar red(0, 0, 255);
+    const cv::Scalar yellow(0, 255, 255);
+    switch (which) {
+        case OutputImage::Original: return r.image;
+        case OutputImage::Superpixels:
+            return r.superpixel_labels.empty() ? cv::Mat() : render_label_boundaries(r.image, r.superpixel_labels, yellow);
+        case OutputImage::Segmentation: return r.ok ? render_segment_tint(r.image, r.region_map) : cv::Mat();
+        case OutputImage::Boundaries: return r.ok ? render_label_boundaries(r.image, r.region_map, red) : cv::Mat();
+    }
+    return cv::Mat();
+}
+
 }  // namespace seg

@@ -18,18 +18,11 @@ namespace fs = std::filesystem;
 
 namespace {
 
-const cv::Scalar kRed(0, 0, 255);
-const cv::Scalar kYellow(0, 255, 255);
-
 void write_outputs(const fs::path& dir, const seg::SegmentationResult& r) {
     fs::create_directories(dir);
-    cv::imwrite((dir / "original.png").string(), r.image);
-    if (!r.superpixel_labels.empty()) {
-        cv::imwrite((dir / "superpixels.png").string(), seg::render_label_boundaries(r.image, r.superpixel_labels, kYellow));
-    }
-    if (r.ok) {
-        cv::imwrite((dir / "segmentation.png").string(), seg::render_segment_tint(r.image, r.region_map));
-        cv::imwrite((dir / "boundaries.png").string(), seg::render_label_boundaries(r.image, r.region_map, kRed));
+    for (const seg::OutputImage which : seg::kOutputImages) {
+        const cv::Mat img = seg::render_output(r, which);
+        if (!img.empty()) cv::imwrite((dir / (std::string(seg::to_string(which)) + ".png")).string(), img);
     }
 }
 
