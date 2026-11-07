@@ -5,8 +5,11 @@
 #include <chrono>
 #include <cmath>
 #include <numeric>
+#include <stdexcept>
+#include <string>
 #include <vector>
 
+#include <opencv2/imgcodecs.hpp>
 #include <opencv2/imgproc.hpp>
 #include <opencv2/ximgproc/slic.hpp>
 
@@ -81,6 +84,40 @@ std::vector<std::filesystem::path> list_images(const std::filesystem::path& dir)
     return out;
 }
 
+cv::Mat working_image(const cv::Mat& bgr, int max_dim) {
+    const int long_side = std::max(bgr.cols, bgr.rows);
+    if (max_dim <= 0 || long_side <= max_dim) return bgr.clone();
+    const double f = static_cast<double>(max_dim) / long_side;
+    cv::Mat out;
+    cv::resize(bgr, out, cv::Size(), f, f, cv::INTER_AREA);
+    return out;
+}
+
+std::string encode_label_png(const cv::Mat& labels) {
+    if (labels.empty() || labels.type() != CV_32S) {
+        throw std::invalid_argument("encode_label_png: expected non-empty CV_32S labels");
+    }
+    double lo = 0.0;
+    double hi = 0.0;
+    cv::minMaxLoc(labels, &lo, &hi);
+    if (lo < 0.0 || hi > 65535.0) throw std::invalid_argument("encode_label_png: labels outside [0, 65535]");
+    cv::Mat wide;
+    labels.convertTo(wide, CV_16U);
+    std::vector<uchar> png;
+    if (!cv::imencode(".png", wide, png)) throw std::runtime_error("encode_label_png: PNG encoding failed");
+    return std::string(png.begin(), png.end());
+}
+
+cv::Mat decode_label_png(const std::string& png) {
+    const cv::Mat wide = cv::imdecode(
+        cv::_InputArray(reinterpret_cast<const uchar*>(png.data()), static_cast<int>(png.size())),
+        cv::IMREAD_UNCHANGED);
+    if (wide.empty() || wide.type() != CV_16UC1) throw std::runtime_error("decode_label_png: not a 16-bit label PNG");
+    cv::Mat labels;
+    wide.convertTo(labels, CV_32S);
+    return labels;
+}
+
 const char* to_string(Method m) { return m == Method::Flat ? "flat" : "recursive"; }
 
 SegmentationResult segment(const cv::Mat& bgr, const SegmentParams& params) {
@@ -93,13 +130,7 @@ SegmentationResult segment(const cv::Mat& bgr, const SegmentParams& params) {
     }
 
     auto t0 = Clock::now();
-    const int long_side = std::max(bgr.cols, bgr.rows);
-    if (params.max_dim > 0 && long_side > params.max_dim) {
-        const double f = static_cast<double>(params.max_dim) / long_side;
-        cv::resize(bgr, r.image, cv::Size(), f, f, cv::INTER_AREA);
-    } else {
-        r.image = bgr.clone();
-    }
+    r.image = working_image(bgr, params.max_dim);
     cv::Mat smoothed;
     if (params.blur_sigma > 0.0) {
         cv::GaussianBlur(r.image, smoothed, cv::Size(), params.blur_sigma);

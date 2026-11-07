@@ -6,9 +6,12 @@ namespace httplib {
 class Server;
 }
 
+namespace seg::db {
+class Database;
+}
+
 namespace seg::api {
 
-class RunStore;
 
 struct ApiLimits {
     std::size_t max_upload_bytes = 20u << 20;
@@ -16,7 +19,7 @@ struct ApiLimits {
     int min_image_side = 16;
 };
 
-// Registers the /api routes and JSON error handlers; store must outlive server.
-void register_routes(httplib::Server& server, RunStore& store, const ApiLimits& limits);
+// Registers the /api routes and JSON error handlers; db must outlive server.
+void register_routes(httplib::Server& server, db::Database& db, const ApiLimits& limits);
 
 }  // namespace seg::api

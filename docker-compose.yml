@@ -1,0 +1,37 @@
+# docker compose up --build   -> API on http://localhost:8080, PostgreSQL on localhost:5433
+# docker compose down         -> stop; saved experiments survive in the pgdata volume
+# docker compose down -v      -> stop and delete the database
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      # Development-only credentials.
+      POSTGRES_USER: seg
+      POSTGRES_PASSWORD: seg
+      POSTGRES_DB: seg
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    ports:
+      - "5433:5432"
+    healthcheck:
+      # -h forces TCP, which the temporary server used during first-time init does not open.
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U seg -d seg"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  api:
+    build: .
+    entrypoint: ["seg_server"]
+    environment:
+      # The schema is applied by the server at startup.
+      SEG_DATABASE_URL: postgresql://seg:seg@db:5432/seg
+    ports:
+      - "8080:8080"
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: unless-stopped
+
+volumes:
+  pgdata:

@@ -81,11 +81,22 @@ target_link_libraries(segcore PUBLIC Eigen3::Eigen Spectra::Spectra ${OpenCV_LIB
 add_executable(segment apps/segment.cpp)
 target_link_libraries(segment PRIVATE segcore seg_warnings)
 
+# ---- Persistence --------------------------------------------------------------------------
+# libpq (apt: libpq-dev). The schema is embedded into the binary so the server can migrate.
+find_package(PostgreSQL REQUIRED)
+file(READ ${CMAKE_CURRENT_SOURCE_DIR}/src/db/schema.sql SEG_SCHEMA_SQL)
+configure_file(src/db/schema_sql.hpp.in ${CMAKE_CURRENT_BINARY_DIR}/generated/schema_sql.hpp @ONLY)
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS src/db/schema.sql)
+
+add_library(segdb STATIC src/db/database.cpp)
+target_include_directories(segdb PUBLIC src PRIVATE ${CMAKE_CURRENT_BINARY_DIR}/generated)
+target_link_libraries(segdb PUBLIC PostgreSQL::PostgreSQL PRIVATE seg_warnings)
+
 # ---- HTTP API -----------------------------------------------------------------------------
-# In-memory run/result store, JSON codec, and HTTP routes around seg::segment().
-add_library(segapi STATIC src/api/run_store.cpp src/api/codec.cpp src/api/routes.cpp)
+# JSON codec and HTTP routes around seg::segment(), persisting through segdb.
+add_library(segapi STATIC src/api/ids.cpp src/api/codec.cpp src/api/routes.cpp)
 target_include_directories(segapi PUBLIC src)
-target_link_libraries(segapi PUBLIC segcore nlohmann_json httplib PRIVATE seg_warnings)
+target_link_libraries(segapi PUBLIC segcore segdb nlohmann_json httplib PRIVATE seg_warnings)
 
 add_executable(seg_server apps/server.cpp)
 target_link_libraries(seg_server PRIVATE segapi seg_warnings)

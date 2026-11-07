@@ -87,6 +87,14 @@ struct SegmentationResult {
 
 SegmentationResult segment(const cv::Mat& bgr, const SegmentParams& params);
 
+// The image segment() works on: bgr shrunk so its long side is at most max_dim (0 = as is).
+cv::Mat working_image(const cv::Mat& bgr, int max_dim);
+
+// Lossless 16-bit PNG of a CV_32S label map with labels in [0, 65535]; throws otherwise.
+std::string encode_label_png(const cv::Mat& labels);
+// Inverse of encode_label_png; throws std::runtime_error on undecodable input.
+cv::Mat decode_label_png(const std::string& png);
+
 std::vector<std::filesystem::path> list_images(const std::filesystem::path& dir);
 
 cv::Mat render_label_boundaries(const cv::Mat& bgr, const cv::Mat& labels, const cv::Scalar& color);
