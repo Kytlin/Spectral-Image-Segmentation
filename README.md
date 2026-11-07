@@ -18,7 +18,7 @@ The engine uses a superpixel-based implementation of Ng–Jordan–Weiss (NJW) s
 2. **Graph construction:** Adjacent superpixels form a sparse weighted graph, with affinities derived from colour and spatial similarity.
 3. **Spectral embedding:** Spectra computes eigenvectors of the symmetric normalized affinity matrix
 
-   $$
+  $$
    M=D^{-1/2}WD^{-1/2},
    $$
 
