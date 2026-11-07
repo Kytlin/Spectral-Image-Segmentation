@@ -58,16 +58,13 @@ Concurrent requests for the same key share one graph build. `shared_ptr<const Pr
 
 Benchmarked in Docker on a 6-core laptop using WSL2. Timings are medians of three measured runs following one warm-up.
 
-| Image | Method | Segments | Compute (ms) | Max eigenpair residual |
-|---|---|---:|---:|---:|
-| Coffee cup | Recursive | 62 | 1,586 | 3e-11 |
-| Downtown street | Recursive | 80 | 797 | 5e-11 |
-| Tibet mountains | Recursive | 80 | 1,150 | 5e-11 |
-| Coffee cup | Flat | 6 | 856 | 1e-12 |
-| Downtown street | Flat | 6 | 112 | 5e-13 |
-| Tibet mountains | Flat | 6 | 193 | 3e-13 |
+| Image | Segments | Compute (ms) | Max eigenpair residual |
+|---|---:|---:|---:|
+| Coffee cup | 62 | 1,586 | 3e-11 |
+| Downtown street | 80 | 797 | 5e-11 |
+| Tibet mountains | 80 | 1,150 | 5e-11 |
 
-Recursive NJW produces more regions at greater computational cost. The methods use different segment counts, so their runtime and normalized-cut values are not direct measures of equivalent segmentation quality.
+The coffee-cup image takes longer despite producing fewer segments because runtime depends on the cost of the recursive eigenvalue solves, not simply the final segment count. Its fine colour variations may produce closely spaced eigenvalues, slowing iterative convergence, while the normalized-cut criterion rejects additional partitions. The larger input image may also increase preprocessing cost.
 
 ### Numerical validation
 
