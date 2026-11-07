@@ -121,30 +121,51 @@ eigenvectors are accurate and any segmentation errors come from the method, not 
 ## HTTP API
 
 ```bash
-docker run --rm -p 8080:8080 --entrypoint seg_server spectral-seg   # or ./build/seg_server [--port P]
+docker compose up --build        # API on localhost:8080, PostgreSQL on localhost:5433 (volume: pgdata)
+# or locally: ./build/seg_server --db postgresql://seg:seg@localhost:5433/seg [--port P] [--db-pool N]
 
 curl -F image=@data/downtown_toronto.jpeg localhost:8080/api/runs                # -> run_id
 curl -H 'Content-Type: application/json' -d '{"k": 6, "method": "flat", "superpixels": 400}' \
      localhost:8080/api/runs/RUN_ID/results                                      # -> result_id + metrics
-curl localhost:8080/api/results/RESULT_ID
+curl -X PUT localhost:8080/api/experiments/RESULT_ID                             # save to the experiment log
+curl localhost:8080/api/experiments                                              # saved history
 curl -o seg.png localhost:8080/api/results/RESULT_ID/images/segmentation
 ```
 
 | Endpoint | Success |
 |---|---|
-| `GET /api/health` | 200 |
+| `GET /api/health` | 200 (503 if the database is unreachable) |
 | `POST /api/runs` (multipart field `image`, ≤ 20 MB, ≤ 40 MP) | 201 run |
 | `GET /api/runs/{run_id}` | 200 run with `result_ids` |
-| `POST /api/runs/{run_id}/results` (JSON; `k` required) | 201 result: `params` + `metrics` |
+| `POST /api/runs/{run_id}/results` (JSON; `k` required) | 201 result: `params` + `metrics`, `saved_at: null` |
 | `GET /api/results/{result_id}` | 200 result |
 | `GET /api/results/{result_id}/images/{original\|superpixels\|segmentation\|boundaries}` | 200 PNG |
+| `PUT /api/experiments/{result_id}` | 201 when saved now, 200 if already saved (same body) |
+| `GET /api/experiments?limit=50&run_id=` | 200 saved results, most recently saved first |
+| `GET /api/experiments/{result_id}` | 200 saved result (404 if not saved) |
 
 Result parameters are `k`, `method`, `superpixels`, `ncut_threshold`, `sigma_color`, `spatial_scale`,
 `blur_sigma`, `max_dim` and `seed`. Each has the same meaning and default as the CLI flag. Success
-responses are `{"data": ...}`. Errors are `{"error": {"code", "message", "details"?}}`, with status 400
-(bad JSON or parameter), 404 (unknown ID or route), 413 (too large), 415 (wrong content type or
-undecodable image), 422 (the engine rejected the input, e.g. `k` above the superpixel count), 503
-(store full) or 500. Runs and results live in memory only, and a restart drops them.
+responses are `{"data": ..., "meta": {"request_ms": ...}}`. Errors are
+`{"error": {"code", "message", "details"?}}`, with status 400 (bad JSON or parameter), 404 (unknown
+ID or route), 413 (too large), 415 (wrong content type or undecodable image), 422 (the engine
+rejected the input, e.g. `k` above the superpixel count), 503 (database unavailable) or 500.
+
+**Timings.** `metrics.compute_ms` is the engine's own stage timings for that one result, measured
+when it was computed and stored with it. `meta.request_ms` is the server-side time to handle the
+current HTTP request. For `POST .../results` it includes the computation plus database work; for
+reads it is only the lookup. It is never stored.
+
+**Persistence.** PostgreSQL (`src/db/schema.sql`, applied by the server at startup) is the only
+state. `runs` keeps the uploaded file. `results` keeps params, metrics, both label maps and
+`saved_at`, so images re-render after a restart without recomputation. Database triggers reject any
+change to a result except setting `saved_at` once.
+
+Integration tests (docker required; start a throwaway PostgreSQL container):
+
+```bash
+python3 tests/integration/test_persistence.py -v
+```
 
 ## Layout
 
@@ -152,10 +173,11 @@ undecodable image), 422 (the engine rejected the input, e.g. `k` above the super
 src/region_graph.*   superpixel graph (features, adjacency, affinity W)
 src/spectral.*       NJW: normalized affinity, Spectra eigenpairs, k-means++, recursive splitting
 src/segmenter.*      public entry point seg::segment(), rendering, image discovery
-src/api/run_store.*  in-memory runs/results (UUIDs, one mutex)
+src/db/              PostgreSQL schema and libpq access (connection pool, idempotent statements)
 src/api/codec.*      request validation and JSON serialization
+src/api/ids.*        UUIDv4 generation
 src/api/routes.*     HTTP handlers (cpp-httplib)
 apps/segment.cpp     CLI (run, bench)
 apps/server.cpp      HTTP server entry point
-tests/               GoogleTest correctness tests
+tests/               GoogleTest correctness tests; tests/integration/ HTTP + PostgreSQL tests
 ```

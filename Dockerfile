@@ -3,13 +3,13 @@
 #   docker build -t spectral-seg .
 #   docker run --rm -v "$PWD/data:/data:ro" -v "$PWD/out:/out" spectral-seg run /data/IMAGE.jpg /out
 #   docker run --rm -v "$PWD/data:/data:ro" -v "$PWD/out:/out" spectral-seg bench /data /out
-#   docker run --rm -p 8080:8080 --entrypoint seg_server spectral-seg
+#   docker compose up --build        (HTTP API + PostgreSQL, see docker-compose.yml)
 
 # ---- Build: compilers, headers, OpenCV dev packages; unit tests run here ---------------------
 FROM ubuntu:24.04 AS build
 RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
         build-essential cmake ninja-build ca-certificates \
-        libeigen3-dev libopencv-dev libopencv-contrib-dev \
+        libeigen3-dev libopencv-dev libopencv-contrib-dev libpq-dev \
     && rm -rf /var/lib/apt/lists/*
 WORKDIR /src
 COPY CMakeLists.txt ./
@@ -24,7 +24,7 @@ RUN cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release \
 # ---- Runtime: only the shared libraries the binary links against ---------------------------
 FROM ubuntu:24.04
 RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-        libopencv-core406t64 libopencv-imgproc406t64 libopencv-imgcodecs406t64 libopencv-contrib406t64 \
+        libopencv-core406t64 libopencv-imgproc406t64 libopencv-imgcodecs406t64 libopencv-contrib406t64 libpq5 \
     && rm -rf /var/lib/apt/lists/*
 COPY --from=build /src/build/segment /src/build/seg_server /usr/local/bin/
 EXPOSE 8080

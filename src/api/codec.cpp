@@ -119,7 +119,7 @@ json metrics_to_json(const SegmentationResult& r) {
              {"splits_rejected", s.splits_rejected},
              {"failed_solves", s.failed_solves},
          }},
-        {"timings_ms",
+        {"compute_ms",
          {
              {"preprocess", r.timings.preprocess_ms},
              {"slic", r.timings.slic_ms},
@@ -131,25 +131,26 @@ json metrics_to_json(const SegmentationResult& r) {
     };
 }
 
-json run_to_json(const Run& run) {
+json run_to_json(const db::RunRecord& run) {
     return {
         {"run_id", run.id},
         {"created_at", run.created_at},
         {"filename", run.filename},
         {"bytes", run.bytes},
-        {"width", run.image.cols},
-        {"height", run.image.rows},
+        {"width", run.width},
+        {"height", run.height},
         {"result_ids", run.result_ids},
     };
 }
 
-json result_to_json(const Result& result) {
+json result_to_json(const db::ResultRecord& result) {
     return {
         {"result_id", result.id},
         {"run_id", result.run_id},
         {"created_at", result.created_at},
-        {"params", params_to_json(result.params)},
-        {"metrics", metrics_to_json(result.output)},
+        {"saved_at", result.saved_at ? json(*result.saved_at) : json(nullptr)},
+        {"params", json::parse(result.params_json)},
+        {"metrics", json::parse(result.metrics_json)},
     };
 }
 

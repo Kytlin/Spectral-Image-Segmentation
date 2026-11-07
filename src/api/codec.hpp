@@ -6,7 +6,7 @@
 
 #include <nlohmann/json.hpp>
 
-#include "api/run_store.hpp"
+#include "db/database.hpp"
 #include "segmenter.hpp"
 
 namespace seg::api {
@@ -27,8 +27,11 @@ private:
 SegmentParams parse_segment_params(const nlohmann::json& body);
 
 nlohmann::json params_to_json(const SegmentParams& p);
+// The engine's metrics for one segmentation. compute_ms holds that call's own stage
+// timings (engine wall clock), never HTTP latency or sums over several results.
 nlohmann::json metrics_to_json(const SegmentationResult& r);
-nlohmann::json run_to_json(const Run& run);
-nlohmann::json result_to_json(const Result& result);
+nlohmann::json run_to_json(const db::RunRecord& run);
+// params and metrics are the stored jsonb, passed through without recomputation.
+nlohmann::json result_to_json(const db::ResultRecord& result);
 
 }  // namespace seg::api
