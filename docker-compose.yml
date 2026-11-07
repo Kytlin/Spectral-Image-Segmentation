@@ -1,4 +1,4 @@
-# docker compose up --build   -> API on http://localhost:8080, PostgreSQL on localhost:5433
+# docker compose up --build   -> UI + API on http://localhost:8080, PostgreSQL on localhost:5433
 # docker compose down         -> stop; saved experiments survive in the pgdata volume
 # docker compose down -v      -> stop and delete the database
 services:
@@ -12,7 +12,7 @@ services:
     volumes:
       - pgdata:/var/lib/postgresql/data
     ports:
-      - "5433:5432"
+      - "${SEG_DB_PORT:-5433}:5432"
     healthcheck:
       # -h forces TCP, which the temporary server used during first-time init does not open.
       test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U seg -d seg"]
@@ -26,8 +26,11 @@ services:
     environment:
       # The schema is applied by the server at startup.
       SEG_DATABASE_URL: postgresql://seg:seg@db:5432/seg
+    # Keeps the 8 most recently used graphs (1 GB safety cap); the UI is served from
+    # SEG_WEB_ROOT set in the image.
+    command: ["--cache-graphs", "8", "--cache-mb", "1024"]
     ports:
-      - "8080:8080"
+      - "${SEG_PORT:-8080}:8080"
     depends_on:
       db:
         condition: service_healthy

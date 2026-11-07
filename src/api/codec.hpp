@@ -22,8 +22,10 @@ private:
     std::string field_;
 };
 
-// Body of POST /runs/{id}/results: "k" is required; omitted fields keep the CLI defaults
-// from SegmentParams, so equal inputs give the CLI's result. Throws ValidationError.
+// Body of POST /runs/{id}/results: "k" is required; method, superpixels, ncut_threshold,
+// blur_sigma and max_dim are optional. Everything else (seed, sigma_color, spatial_scale, ...)
+// is fixed at the SegmentParams defaults, which the CLI also uses, and is rejected as unknown.
+// Throws ValidationError.
 SegmentParams parse_segment_params(const nlohmann::json& body);
 
 nlohmann::json params_to_json(const SegmentParams& p);

@@ -5,6 +5,7 @@
 #include <chrono>
 #include <cmath>
 #include <numeric>
+#include <sstream>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -120,34 +121,34 @@ cv::Mat decode_label_png(const std::string& png) {
 
 const char* to_string(Method m) { return m == Method::Flat ? "flat" : "recursive"; }
 
-SegmentationResult segment(const cv::Mat& bgr, const SegmentParams& params) {
+PreparedGraph prepare_graph(const cv::Mat& bgr, const SegmentParams& params) {
     const auto t_total = Clock::now();
-    SegmentationResult r;
+    PreparedGraph p;
     if (bgr.empty() || bgr.type() != CV_8UC3) {
-        r.status = "invalid_image";
-        r.message = "expected a non-empty CV_8UC3 image";
-        return r;
+        p.status = "invalid_image";
+        p.message = "expected a non-empty CV_8UC3 image";
+        return p;
     }
 
     auto t0 = Clock::now();
-    r.image = working_image(bgr, params.max_dim);
+    p.image = working_image(bgr, params.max_dim);
     cv::Mat smoothed;
     if (params.blur_sigma > 0.0) {
-        cv::GaussianBlur(r.image, smoothed, cv::Size(), params.blur_sigma);
+        cv::GaussianBlur(p.image, smoothed, cv::Size(), params.blur_sigma);
     } else {
-        smoothed = r.image;
+        smoothed = p.image;
     }
     cv::Mat lab;
     smoothed.convertTo(lab, CV_32FC3, 1.0 / 255.0);
     cv::cvtColor(lab, lab, cv::COLOR_BGR2Lab);
-    r.timings.preprocess_ms = ms_since(t0);
+    p.timings.preprocess_ms = ms_since(t0);
 
-    const double pixels = static_cast<double>(r.image.rows) * r.image.cols;
+    const double pixels = static_cast<double>(p.image.rows) * p.image.cols;
     if (params.superpixels < 2 || params.superpixels > pixels / 4.0) {
-        r.status = "invalid_superpixels";
-        r.message = "superpixels=" + std::to_string(params.superpixels) + " outside [2, pixels/4]";
-        r.timings.total_ms = ms_since(t_total);
-        return r;
+        p.status = "invalid_superpixels";
+        p.message = "superpixels=" + std::to_string(params.superpixels) + " outside [2, pixels/4]";
+        p.timings.total_ms = ms_since(t_total);
+        return p;
     }
 
     t0 = Clock::now();
@@ -158,12 +159,63 @@ SegmentationResult segment(const cv::Mat& bgr, const SegmentParams& params) {
     slic->enforceLabelConnectivity(25);
     cv::Mat raw_labels;
     slic->getLabels(raw_labels);
-    r.superpixels_actual = relabel_connected(raw_labels, r.superpixel_labels);
-    r.timings.slic_ms = ms_since(t0);
+    p.superpixels_actual = relabel_connected(raw_labels, p.superpixel_labels);
+    p.timings.slic_ms = ms_since(t0);
 
     t0 = Clock::now();
-    const RegionGraph g = build_region_graph(lab, r.superpixel_labels, params.graph);
-    r.timings.graph_ms = ms_since(t0);
+    p.graph = build_region_graph(lab, p.superpixel_labels, params.graph);
+    p.superpixel_labels = p.graph.labels;  // the graph keeps its own copy; share it, don't store two
+    p.timings.graph_ms = ms_since(t0);
+    p.ok = true;
+    p.timings.total_ms = ms_since(t_total);
+    return p;
+}
+
+// superpixel_labels shares graph.labels' buffer, so the label map is counted once.
+std::size_t PreparedGraph::bytes() const {
+    return image.total() * image.elemSize() + graph.labels.total() * graph.labels.elemSize() +
+           estimate_sparse_bytes(graph.affinity) + graph.edges.size() * sizeof(RegionEdge) +
+           graph.regions.size() * sizeof(RegionFeatures);
+}
+
+std::string graph_cache_key(const std::string& source_id, const SegmentParams& p) {
+    // Hex floats are exact, so equal doubles give equal keys and different ones never collide.
+    std::ostringstream key;
+    key << std::hexfloat << "graph/v1/" << source_id << "/max_dim=" << p.max_dim << "/blur=" << p.blur_sigma
+        << "/superpixels=" << p.superpixels << "/slic_iterations=" << p.slic_iterations
+        << "/sigma_color=" << p.graph.sigma_color << "/spatial_scale=" << p.graph.spatial_scale
+        << "/edge_floor=" << p.graph.edge_floor;
+    return key.str();
+}
+
+void charge_graph_timings(SegmentationResult& r, const StageTimings& graph) {
+    r.timings.preprocess_ms = graph.preprocess_ms;
+    r.timings.slic_ms = graph.slic_ms;
+    r.timings.graph_ms = graph.graph_ms;
+    r.timings.total_ms += graph.total_ms;
+}
+
+SegmentationResult segment(const cv::Mat& bgr, const SegmentParams& params) {
+    const PreparedGraph prepared = prepare_graph(bgr, params);
+    SegmentationResult r = segment_graph(prepared, params);
+    charge_graph_timings(r, prepared.timings);
+    return r;
+}
+
+SegmentationResult segment_graph(const PreparedGraph& prepared, const SegmentParams& params) {
+    const auto t_total = Clock::now();
+    SegmentationResult r;
+    r.status = prepared.status;
+    r.message = prepared.message;
+    // Own copies: a result must never alias the (shared, immutable) cached graph's buffers.
+    r.image = prepared.image.clone();
+    r.superpixel_labels = prepared.superpixel_labels.clone();
+    r.superpixels_actual = prepared.superpixels_actual;
+    if (!prepared.ok) {
+        r.timings.total_ms = ms_since(t_total);
+        return r;
+    }
+    const RegionGraph& g = prepared.graph;
     r.graph_nodes = g.num_nodes();
     r.graph_nnz = static_cast<long>(g.affinity.nonZeros());
     r.graph_mem_est_bytes = 2 * estimate_sparse_bytes(g.affinity) + g.edges.size() * sizeof(RegionEdge);

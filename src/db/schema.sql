@@ -12,6 +12,7 @@ CREATE TABLE IF NOT EXISTS runs (
 
 -- One segmentation of a run. Everything except saved_at is written once at creation;
 -- saved_at goes from NULL to a timestamp at most once (saving to the experiment log).
+-- Clearing the experiment log deletes saved rows; unsaved rows cannot be deleted.
 CREATE TABLE IF NOT EXISTS results (
     id                 uuid        PRIMARY KEY,
     run_id             uuid        NOT NULL REFERENCES runs (id),
@@ -48,9 +49,18 @@ BEGIN
     RETURN NEW;
 END $$;
 
+CREATE OR REPLACE FUNCTION results_delete_guard() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+    IF OLD.saved_at IS NULL THEN
+        RAISE EXCEPTION 'only saved results can be deleted (by clearing the experiment log)'
+            USING ERRCODE = 'integrity_constraint_violation';
+    END IF;
+    RETURN OLD;
+END $$;
+
 CREATE OR REPLACE TRIGGER runs_immutable BEFORE UPDATE OR DELETE ON runs
     FOR EACH ROW EXECUTE FUNCTION reject_mutation();
 CREATE OR REPLACE TRIGGER results_immutable BEFORE UPDATE ON results
     FOR EACH ROW EXECUTE FUNCTION results_immutable();
 CREATE OR REPLACE TRIGGER results_no_delete BEFORE DELETE ON results
-    FOR EACH ROW EXECUTE FUNCTION reject_mutation();
+    FOR EACH ROW EXECUTE FUNCTION results_delete_guard();

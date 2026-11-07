@@ -72,8 +72,8 @@ target_compile_options(seg_warnings INTERFACE
 set(SEG_DATA_DIR ${CMAKE_CURRENT_SOURCE_DIR}/data)
 
 # ---- Core library -------------------------------------------------------------------------
-# Region graph, spectral clustering (Spectra + OpenCV k-means), and the SLIC pipeline.
-add_library(segcore STATIC src/region_graph.cpp src/spectral.cpp src/segmenter.cpp)
+# Region graph, spectral clustering (Spectra + OpenCV k-means), the SLIC pipeline and its graph cache.
+add_library(segcore STATIC src/region_graph.cpp src/spectral.cpp src/segmenter.cpp src/graph_cache.cpp)
 target_include_directories(segcore PUBLIC src)
 target_include_directories(segcore SYSTEM PUBLIC ${OpenCV_INCLUDE_DIRS})
 target_link_libraries(segcore PUBLIC Eigen3::Eigen Spectra::Spectra ${OpenCV_LIBS} PRIVATE seg_warnings)

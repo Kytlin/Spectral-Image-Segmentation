@@ -1,9 +1,17 @@
-# Spectral segmentation engine: build + test in one stage, run from a slim runtime stage.
+# Spectral segmentation engine, HTTP API and React UI: build + test stages, slim runtime stage.
 #
 #   docker build -t spectral-seg .
 #   docker run --rm -v "$PWD/data:/data:ro" -v "$PWD/out:/out" spectral-seg run /data/IMAGE.jpg /out
 #   docker run --rm -v "$PWD/data:/data:ro" -v "$PWD/out:/out" spectral-seg bench /data /out
-#   docker compose up --build        (HTTP API + PostgreSQL, see docker-compose.yml)
+#   docker compose up --build        (UI + HTTP API + PostgreSQL on http://localhost:8080)
+
+# ---- Web: React UI built to static files; its unit tests run here ----------------------------
+FROM node:22-alpine AS web
+WORKDIR /web
+COPY web/package.json web/package-lock.json ./
+RUN npm ci --no-audit --no-fund
+COPY web ./
+RUN npm test && npm run build
 
 # ---- Build: compilers, headers, OpenCV dev packages; unit tests run here ---------------------
 FROM ubuntu:24.04 AS build
@@ -27,6 +35,8 @@ RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-ins
         libopencv-core406t64 libopencv-imgproc406t64 libopencv-imgcodecs406t64 libopencv-contrib406t64 libpq5 \
     && rm -rf /var/lib/apt/lists/*
 COPY --from=build /src/build/segment /src/build/seg_server /usr/local/bin/
+COPY --from=web /web/dist /usr/share/seg/web
+ENV SEG_WEB_ROOT=/usr/share/seg/web
 EXPOSE 8080
 WORKDIR /work
 ENTRYPOINT ["segment"]

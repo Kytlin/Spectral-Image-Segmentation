@@ -50,17 +50,10 @@ SegmentParams parse_segment_params(const json& body) {
             p.superpixels = static_cast<int>(get_int(v, key, 2, 20000));
         } else if (key == "ncut_threshold") {
             p.ncut_threshold = get_double(v, key, 0.0, 2.0, true);
-        } else if (key == "sigma_color") {
-            p.graph.sigma_color = get_double(v, key, 0.0, 100.0, true);
-        } else if (key == "spatial_scale") {
-            p.graph.spatial_scale = get_double(v, key, 0.0, 100.0, false);
         } else if (key == "blur_sigma") {
             p.blur_sigma = get_double(v, key, 0.0, 20.0, false);
         } else if (key == "max_dim") {
             p.max_dim = static_cast<int>(get_int(v, key, 0, 4096));
-        } else if (key == "seed") {
-            if (!v.is_number_unsigned()) throw ValidationError(key, "seed must be a non-negative integer");
-            p.seed = v.get<std::uint64_t>();
         } else {
             throw ValidationError(key, "unknown parameter " + key);
         }

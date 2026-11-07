@@ -1,183 +1,107 @@
 # Spectral Image Segmentation
 
-A C++17 engine that segments an image with spectral clustering.
+[**Watch Demo Video**](image_seg_demo.mp4)
 
-1. OpenCV SLIC groups the pixels into superpixels.
-2. The superpixels and their neighbours form a colour-similarity graph.
-3. Spectra computes eigenvectors of the normalized affinity matrix.
-4. k-means++ splits the graph into segments.
+A C++17 spectral clustering engine with a React frontend and PostgreSQL-backed HTTP API. It partitions images into colour- and spatially coherent regions using sparse graph methods and numerical linear algebra.
 
-The default method is **recursive NJW**, which splits regions in two until a split would cut
-through similar colours. **Flat NJW**, the textbook k-way version, is also available.
+The application supports interactive segmentation, caching of expensive graph computations, and persistent experiment logging.
 
-Segments follow colour and adjacency. They are not object detection.
+## How to run
 
-## Run with Docker (no local OpenCV needed)
+Run `docker compose up --build` in terminal and then go to http://localhost:8080 on web browser.
 
-```bash
-docker build -t spectral-seg .            # builds the engine and runs the unit tests (~5 min the first time)
-mkdir -p out
+## Algorithm
 
-# Segment one image (./data is mounted at /data, results go to ./out; use any file in data/)
-docker run --rm -v "$PWD/data:/data:ro" -v "$PWD/out:/out" spectral-seg run /data/tibet_mountains.jpg /out
+The engine uses a superpixel-based implementation of Ng–Jordan–Weiss (NJW) spectral clustering based on Luxenburg's paper <i>A Tutorial on Spectral Clustering</i>:
 
-# Finer or coarser output, with custom parameters
-docker run --rm -v "$PWD/data:/data:ro" -v "$PWD/out:/out" spectral-seg \
-    run /data/downtown_toronto.jpeg /out --superpixels 1500 --k 40 --ncut 0.1 --blur 2
+1. **Preprocessing:** OpenCV converts the image to CIELAB colour space and applies SLIC superpixel clustering.
+2. **Graph construction:** Adjacent superpixels form a sparse weighted graph, with affinities derived from colour and spatial similarity.
+3. **Spectral embedding:** Spectra computes eigenvectors of the symmetric normalized affinity matrix
 
-# Benchmark every image in data/ and write results.csv plus images to ./out
-docker run --rm -v "$PWD/data:/data:ro" -v "$PWD/out:/out" spectral-seg \
-    bench /data /out --sweep-image downtown_toronto.jpeg
+   $$
+   M=D^{-1/2}WD^{-1/2},
+   $$
+
+   where $W$ is the affinity matrix and $D$ is the diagonal degree matrix.
+4. **Clustering:** OpenCV k-means++ clusters the row-normalized eigenvector embedding. Cluster labels are projected back onto image pixels.
+
+<i>Recursive</i> NJW is the method used for the app. It recursively bipartitions regions according to a normalized-cut stopping criterion, producing finer segmentations than flat NJW on the tested images. Standard flat NJW implementation is preserved for benchmarking.
+
+<b>Important note:</b> This is <i>region segmentation</i> algorithm based on color and locality, <b>not</b> semantic object detection. Regions reflect the constructed graph's colour and adjacency relationships rather than object identity.
+
+## Architecture
+
+```text
+React frontend
+      |
+      v
+C++ HTTP API (cpp-httplib)
+      |
+      +--- Numerical engine (Eigen / Spectra / OpenCV)
+      |
+      +--- Thread-safe LRU graph cache
+      |
+      +--- PostgreSQL (libpq connection pool)
 ```
 
-To add or remove test images, put files in `data/` (`.png .jpg .jpeg .bmp .tif .tiff .webp`).
-The unit tests and the benchmark both pick up whatever is in that folder. `run` and `bench` read
-the mounted folder, so no rebuild is needed for them. The unit tests in `docker build` use the
-copy of `data/` taken at build time.
+The numerical engine is independent of HTTP and persistence. Both the CLI and API use the same computation pipeline.
 
-On Linux, add `--user "$(id -u):$(id -g)"` so the files in `./out` are owned by you rather than
-root.
+**Computation and caching.** Graph construction is separated from spectral clustering through `prepare_graph()` and `segment_graph()`. A bounded LRU cache stores immutable prepared graphs, keyed by image run and graph parameters.
 
-<!-- ## Build locally (Ubuntu 24.04)
+Concurrent requests for the same key share one graph build. `shared_ptr<const PreparedGraph>` preserves object lifetime during eviction, while mutex-protected cache metadata avoids locking during expensive computation.
 
-```bash
-sudo apt install -y build-essential cmake ninja-build libeigen3-dev libopencv-dev libopencv-contrib-dev
-cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release   # fetches Spectra 1.1.0 and GoogleTest
-cmake --build build -j
-./build/tests/segcore_tests                               # or: ctest --test-dir build
-./build/segment run data/tibet_mountains.jpg out
-./build/segment bench data benchmarks --sweep-image downtown_toronto.jpeg
-``` -->
+**Persistence.** PostgreSQL stores uploaded images, immutable segmentation results, parameters, metrics, and label maps. Saving a result is an idempotent operation on its result ID. Results remain retrievable after server restarts, independently of the in-memory cache.
 
-## Outputs (`run`)
+**Request consistency.** Frontend request ordering prevents stale responses from replacing newer results. Stored metrics distinguish computation time from cache lookup and HTTP request latency.
 
-| File | Content |
-|---|---|
-| `original.png` | working image (shrunk to at most 800 px on the long side) |
-| `superpixels.png` | superpixel boundaries |
-| `segmentation.png` | the photo with a dim colour wash per segment and thin borders |
-| `boundaries.png` | segment boundaries in red |
+## Performance
 
-## Parameters
+Benchmarked in Docker on a 6-core laptop using WSL2. Timings are medians of three measured runs following one warm-up.
 
-| Flag | Default | Effect |
-|---|---|---|
-| `--method recursive\|flat` | recursive | flat produces exactly k clusters |
-| `--superpixels S` | 3000 | finer detail as it rises; slower |
-| `--k K` | 80 | recursive: maximum number of segments. flat: number of clusters |
-| `--ncut T` | 0.05 | similarity threshold: higher means more splits and finer output |
-| `--sigma-color X` | 5 | colour scale of the Gaussian similarity (Lab units): lower means more sensitive to colour change |
-| `--blur SIGMA` | 1 | Gaussian pre-smoothing: higher suppresses texture and noise |
-| `--spatial-scale X` | 2 | spatial similarity scale, in superpixel spacings (0 = off) |
-| `--max-dim D` | 800 | the working image's long side (0 = full size) |
-| `--seed N` | 42 | k-means++ seed (results are deterministic) |
+| Image | Method | Segments | Compute (ms) | Max eigenpair residual |
+|---|---|---:|---:|---:|
+| Coffee cup | Recursive | 62 | 1,586 | 3e-11 |
+| Downtown street | Recursive | 80 | 797 | 5e-11 |
+| Tibet mountains | Recursive | 80 | 1,150 | 5e-11 |
+| Coffee cup | Flat | 6 | 856 | 1e-12 |
+| Downtown street | Flat | 6 | 112 | 5e-13 |
+| Tibet mountains | Flat | 6 | 193 | 3e-13 |
 
-Benchmark flags: `--reps R` (default 3), `--warmup W` (default 1), and `--sweep-image FILE`
-(default: the first image by name). Full results are written to `results.csv`; a summary follows.
+Recursive NJW produces more regions at greater computational cost. The methods use different segment counts, so their runtime and normalized-cut values are not direct measures of equivalent segmentation quality.
 
-## Benchmark
+### Numerical validation
 
-These results come from running `bench` in Docker on the three images in `data/` on (6-core laptop, WSL2). Each setting was run once to warm up and then 3 more times, where the time stat is median of those 3. Every run produced identical segments across repetitions. The app uses the recursive method; flat (set to 6 segments) is the baseline for algo suggested in Luxenburg's survey paper.
+Computed eigenvectors are validated using:
 
-| Image | Method | Segments | Time (ms) | Residual | Orthogonality | Spectral gap | Ncut |
-|---|---|---|---|---|---|---|---|
-| Coffee cup, 735×749 | recursive | 62 | 1586 | 3e-11 | 1e-13 | 1.5e-6 | 1.23 |
-| Downtown street, 387×516 | recursive | 80 (cap) | 797 | 5e-11 | 3e-14 | 3.3e-6 | 2.16 |
-| Tibet mountains, 728×410 | recursive | 80 (cap) | 1150 | 5e-11 | 4e-14 | 1.8e-6 | 1.89 |
-| Coffee cup | flat | 6 | 856 | 1e-12 | 1e-14 | 5.1e-5 | 6e-5 |
-| Downtown street | flat | 6 | 112 | 5e-13 | 6e-15 | 1.0e-4 | 9e-5 |
-| Tibet mountains | flat | 6 (7 regions) | 193 | 3e-13 | 9e-15 | 2.9e-6 | 2e-4 |
+- **Max eigenpair residual:** Find eigenvector $v$ that maximizes $\|Mv-\lambda v\|_2/(\max(1,|\lambda|)\|v\|_2)$
+- **Orthogonality error:** Find the Frobenius norm $\|U^TU-I\|_F$, where $U=[v_1\mid v_2\mid \ldots \mid v_n]$ with $v_i$ as eigenvectors, which is measured before row normalization
+- **Spectral gap:** Difference between adjacent eigenvalues, ordered in increasing order, at the selected embedding dimension
+- **Normalized cut (Ncut):** The ratio of edges crossing one segment to another relative to total number edges in affinity graph. Ideally, the segments correspond to disconnected components on a graph and thus Ncut would be zero in this case
 
-What each column means:
-- **\# of Segments**: The number of pieces the image was cut into. Recursive mode chooses this itself, up to the cap `--k`. Flat mode always produces k.
+Measured orthogonality errors range approximately from $10^{-15}$ to $10^{-13}$. Small eigenpair residuals confirm numerical accuracy but do not guarantee perceptually meaningful segments.
 
-- **Time**: Time it takes to segment an image
+### Graph resolution trade-off
 
-- **Residual error**: Find eigenvector $v$ that maximizes 
-$\lVert Mv − λv\rVert / (\max (1, \lvert λ\rvert)\cdot \lVert v\rVert)$ over the computed eigenpairs of $M = D^{-1/2} W D^{-1/2}$. It shows how exactly each vector satisfies Mv = λv; 0 is exact.
+Downtown street image, recursive NJW:
 
-- **Orthogonality**: Compute the Frobenius norm ${\lVert UᵀU − I\rVert}_F$, where $U$ consists of clustered eigenvectors appended as columns, which measures how far the eigenvectors is from being an orthogonal basis. Eigenvectors of a symmetric matrix should be mutually perpendicular, so we expect result to be close to 0. Recursive mode reports slightly worse split.
-
-- **Spectral gap**: Find $\Delta\lambda_k  := \lambda_k − \lambda_{k+1}$, the distance from the last eigenvalue used to the next one, sorted in increasing order.
-  Recursive mode reports it for the first split (k = 2, on the full graph). A large gap means
-  the clustering is stable. Here every gap is small (about 1e-6) because the top eigenvalues of an image graph all sit just below 1. `results.csv` also records the smallest gap over all recursive splits.
-
-- **Normalized cut (Ncut)**: Compute $\sum_i \text{cut}(A_i, S / A_i) / \text{vol}(A_i)$ over the displayed regions $A_1, A_2,\ldots, A_k$, where $S$ is the whole directed graph constructed from image and the cut of $A$ and $B$ is defined as the sum of all weighted edges that crosses from $A$ to $B$. Smaller value means the regions are better separated. It grows with the number of regions and thus one needs to refer to the segment count to compare Ncut among the results.
-
-The residual and orthogonality are close to double-precision rounding everywhere, so the
-eigenvectors are accurate and any segmentation errors come from the method, not the numerics.
-
-**Fine versus coarse** (downtown street, recursive, default settings except `--superpixels`):
-
-| Superpixels | Segments | Time (ms) |
-|---|---|---|
+| SLIC superpixels | Output segments | Compute (ms) |
+|---:|---:|---:|
 | 400 | 22 | 117 |
 | 750 | 40 | 154 |
-| 1157 | 49 | 232 |
-| 1954 | 61 | 425 |
-| 3005 (default) | 80 (cap) | 797 |
+| 1,157 | 49 | 232 |
+| 1,954 | 61 | 425 |
+| 3,005 | 80 | 797 |
 
+Increasing superpixel resolution captures finer regions but increases computational cost.
 
-## HTTP API
+### Cache performance
 
-```bash
-docker compose up --build        # API on localhost:8080, PostgreSQL on localhost:5433 (volume: pgdata)
-# or locally: ./build/seg_server --db postgresql://seg:seg@localhost:5433/seg [--port P] [--db-pool N]
+The graph cache avoids repeated preprocessing, SLIC, and affinity construction.
 
-curl -F image=@data/downtown_toronto.jpeg localhost:8080/api/runs                # -> run_id
-curl -H 'Content-Type: application/json' -d '{"k": 6, "method": "flat", "superpixels": 400}' \
-     localhost:8080/api/runs/RUN_ID/results                                      # -> result_id + metrics
-curl -X PUT localhost:8080/api/experiments/RESULT_ID                             # save to the experiment log
-curl localhost:8080/api/experiments                                              # saved history
-curl -o seg.png localhost:8080/api/results/RESULT_ID/images/segmentation
-```
+| Image | Cold request (ms) | Cached request (ms) | Speed-up |
+|---|---:|---:|---:|
+| Coffee cup | 1,739 | 968 | 1.8× |
+| Downtown street | 744 | 519 | 1.4× |
+| Tibet mountains | 1,106 | 788 | 1.4× |
 
-| Endpoint | Success |
-|---|---|
-| `GET /api/health` | 200 (503 if the database is unreachable) |
-| `POST /api/runs` (multipart field `image`, ≤ 20 MB, ≤ 40 MP) | 201 run |
-| `GET /api/runs/{run_id}` | 200 run with `result_ids` |
-| `POST /api/runs/{run_id}/results` (JSON; `k` required) | 201 result: `params` + `metrics`, `saved_at: null` |
-| `GET /api/results/{result_id}` | 200 result |
-| `GET /api/results/{result_id}/images/{original\|superpixels\|segmentation\|boundaries}` | 200 PNG |
-| `PUT /api/experiments/{result_id}` | 201 when saved now, 200 if already saved (same body) |
-| `GET /api/experiments?limit=50&run_id=` | 200 saved results, most recently saved first |
-| `GET /api/experiments/{result_id}` | 200 saved result (404 if not saved) |
-
-Result parameters are `k`, `method`, `superpixels`, `ncut_threshold`, `sigma_color`, `spatial_scale`,
-`blur_sigma`, `max_dim` and `seed`. Each has the same meaning and default as the CLI flag. Success
-responses are `{"data": ..., "meta": {"request_ms": ...}}`. Errors are
-`{"error": {"code", "message", "details"?}}`, with status 400 (bad JSON or parameter), 404 (unknown
-ID or route), 413 (too large), 415 (wrong content type or undecodable image), 422 (the engine
-rejected the input, e.g. `k` above the superpixel count), 503 (database unavailable) or 500.
-
-**Timings.** `metrics.compute_ms` is the engine's own stage timings for that one result, measured
-when it was computed and stored with it. `meta.request_ms` is the server-side time to handle the
-current HTTP request. For `POST .../results` it includes the computation plus database work; for
-reads it is only the lookup. It is never stored.
-
-**Persistence.** PostgreSQL (`src/db/schema.sql`, applied by the server at startup) is the only
-state. `runs` keeps the uploaded file. `results` keeps params, metrics, both label maps and
-`saved_at`, so images re-render after a restart without recomputation. Database triggers reject any
-change to a result except setting `saved_at` once.
-
-Integration tests (docker required; start a throwaway PostgreSQL container):
-
-```bash
-python3 tests/integration/test_persistence.py -v
-```
-
-## Layout
-
-```
-src/region_graph.*   superpixel graph (features, adjacency, affinity W)
-src/spectral.*       NJW: normalized affinity, Spectra eigenpairs, k-means++, recursive splitting
-src/segmenter.*      public entry point seg::segment(), rendering, image discovery
-src/db/              PostgreSQL schema and libpq access (connection pool, idempotent statements)
-src/api/codec.*      request validation and JSON serialization
-src/api/ids.*        UUIDv4 generation
-src/api/routes.*     HTTP handlers (cpp-httplib)
-apps/segment.cpp     CLI (run, bench)
-apps/server.cpp      HTTP server entry point
-tests/               GoogleTest correctness tests; tests/integration/ HTTP + PostgreSQL tests
-```
+These measurements use recursive NJW with default settings. Eigenvectors are recomputed for each segmentation, limiting the benefit of graph caching.

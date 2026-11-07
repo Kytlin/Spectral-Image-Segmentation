@@ -106,8 +106,9 @@ class Postgres:
 
 
 class Server:
-    def __init__(self, db_url):
+    def __init__(self, db_url, *extra_args):
         self.db_url = db_url
+        self.extra_args = list(extra_args)
         self.port = free_port()
         self.base = f"http://127.0.0.1:{self.port}"
         self.proc = None
@@ -115,14 +116,14 @@ class Server:
 
     def start(self):
         self.proc = subprocess.Popen([SERVER_BIN, "--host", "127.0.0.1", "--port", str(self.port),
-                                      "--db", self.db_url, "--db-wait", "20"],
+                                      "--db", self.db_url, "--db-wait", "20"] + self.extra_args,
                                      stdout=self.log, stderr=subprocess.STDOUT)
 
         def healthy():
             if self.proc.poll() is not None:
                 raise RuntimeError(f"seg_server exited with {self.proc.returncode}; log: {self.log.name}")
             try:
-                return http("GET", "/api/health", timeout=2)[0] == 200
+                return http("GET", "/api/health", timeout=2, base=self.base)[0] == 200
             except OSError:
                 return False
         wait_until(healthy, 30, "seg_server")
@@ -136,8 +137,8 @@ PG = Postgres()
 SERVER = Server(PG.url)
 
 
-def http(method, path, body=None, ctype=None, timeout=120):
-    req = urllib.request.Request(SERVER.base + path, data=body, method=method)
+def http(method, path, body=None, ctype=None, timeout=120, base=None):
+    req = urllib.request.Request((base or SERVER.base) + path, data=body, method=method)
     if ctype:
         req.add_header("Content-Type", ctype)
     try:
@@ -147,9 +148,9 @@ def http(method, path, body=None, ctype=None, timeout=120):
         return e.code, e.read()
 
 
-def api(method, path, payload=None):
+def api(method, path, payload=None, base=None):
     body = json.dumps(payload).encode() if payload is not None else None
-    status, raw = http(method, path, body, "application/json" if body is not None else None)
+    status, raw = http(method, path, body, "application/json" if body is not None else None, base=base)
     return status, json.loads(raw)
 
 
@@ -165,6 +166,11 @@ def upload(path):
 
 def without(d, *keys):
     return {k: v for k, v in d.items() if k not in keys}
+
+
+def engine_output(metrics):
+    """Metrics that depend only on the inputs: everything except timings and cache status."""
+    return without(metrics, "compute_ms", "cache")
 
 
 def setUpModule():
@@ -187,8 +193,8 @@ class PersistenceTest(unittest.TestCase):
         self.assertEqual(status, 201, body)
         return body["data"]["run_id"]
 
-    def compute(self, run_id, params):
-        status, body = api("POST", f"/api/runs/{run_id}/results", params)
+    def compute(self, run_id, params, base=None):
+        status, body = api("POST", f"/api/runs/{run_id}/results", params, base=base)
         self.assertEqual(status, 201, body)
         # HTTP latency of this request vs the engine time stored with the result.
         self.assertGreaterEqual(body["meta"]["request_ms"], body["data"]["metrics"]["compute_ms"]["total"])
@@ -428,15 +434,140 @@ class PersistenceTest(unittest.TestCase):
         rid = self.compute(run_id, FAST)["result_id"]
         self.assertEqual(self.save(rid)[0], 201)
         where = f"WHERE id = '{rid}'"
-        for sql in (f"UPDATE results SET metrics = '{{}}' {where}",
-                    f"UPDATE results SET params = '{{}}' {where}",
-                    f"UPDATE results SET saved_at = now() {where}",
-                    f"UPDATE results SET saved_at = NULL {where}",
-                    f"DELETE FROM results {where}",
-                    f"UPDATE runs SET filename = 'x' WHERE id = '{run_id}'",
-                    f"DELETE FROM runs WHERE id = '{run_id}'"):
-            self.assertIn("immutable" if "results SET" in sql else "cannot be updated or deleted",
-                          PG.sql_error(sql), sql)
+        unsaved = self.compute(run_id, FAST)["result_id"]
+        for sql, error in ((f"UPDATE results SET metrics = '{{}}' {where}", "immutable"),
+                           (f"UPDATE results SET params = '{{}}' {where}", "immutable"),
+                           (f"UPDATE results SET saved_at = now() {where}", "immutable"),
+                           (f"UPDATE results SET saved_at = NULL {where}", "immutable"),
+                           (f"DELETE FROM results WHERE id = '{unsaved}'", "only saved results can be deleted"),
+                           (f"UPDATE runs SET filename = 'x' WHERE id = '{run_id}'", "cannot be updated or deleted"),
+                           (f"DELETE FROM runs WHERE id = '{run_id}'", "cannot be updated or deleted")):
+            self.assertIn(error, PG.sql_error(sql), sql)
+
+
+    # 8: graph cache --------------------------------------------------------------------------
+    def clear_cache(self, base=None):
+        status, body = api("DELETE", "/api/cache", base=base)
+        self.assertEqual((status, body["data"]["entries"]), (200, 0))
+
+    def test_8a_only_clustering_changes_reuse_the_graph(self):
+        self.clear_cache()
+        run_id = self.new_run()
+        first = self.compute(run_id, FAST)
+        self.assertEqual(first["metrics"]["cache"]["graph"], "miss")
+        built = first["metrics"]["cache"]["graph_build_ms"]
+        self.assertGreaterEqual(first["metrics"]["compute_ms"]["total"], built)  # a miss pays for the graph
+
+        for change in ({"k": 8}, {"method": "recursive", "k": 20},
+                       {"method": "recursive", "k": 20, "ncut_threshold": 0.1}, {}):
+            r = self.compute(run_id, dict(FAST, **change))
+            cache, c = r["metrics"]["cache"], r["metrics"]["compute_ms"]
+            self.assertEqual(cache["graph"], "hit", change)
+            self.assertEqual((c["preprocess"], c["slic"], c["graph"]), (0, 0, 0), change)
+            self.assertEqual(cache["graph_build_ms"], built, change)  # the reused graph's own build cost
+            self.assertLess(c["total"], first["metrics"]["compute_ms"]["total"], change)
+
+        for change in ({"superpixels": 500}, {"blur_sigma": 2}, {"max_dim": 300}):
+            r = self.compute(run_id, dict(FAST, **change))
+            self.assertEqual(r["metrics"]["cache"]["graph"], "miss", change)
+        # Same parameters on another image never share a graph.
+        self.assertEqual(self.compute(self.new_run(), FAST)["metrics"]["cache"]["graph"], "miss")
+
+    def test_8b_cached_results_equal_uncached(self):
+        self.clear_cache()
+        run_id = self.new_run()
+        params = {"k": 30, "superpixels": 1500}  # recursive
+        self.compute(run_id, dict(params, k=10))  # builds the graph
+        cached = self.compute(run_id, params)
+        repeated = self.compute(run_id, params)
+        self.clear_cache()  # invalidation: the next request must rebuild
+        cold = self.compute(run_id, params)
+        self.assertEqual([r["metrics"]["cache"]["graph"] for r in (cached, repeated, cold)], ["hit", "hit", "miss"])
+        self.assertEqual(len({cached["result_id"], repeated["result_id"], cold["result_id"]}), 3)
+        for r in (cached, repeated):
+            self.assertEqual(engine_output(r["metrics"]), engine_output(cold["metrics"]))
+            self.assertEqual(r["params"], cold["params"])
+            self.assertEqual(self.images(r["result_id"]), self.images(cold["result_id"]))
+
+    def test_8c_concurrent_requests_build_the_graph_once(self):
+        self.clear_cache()
+        run_id = self.new_run(SLOW_IMAGE)
+        before = api("GET", "/api/cache")[1]["data"]
+        ks = [4, 5, 6, 7, 8, 9]
+        with concurrent.futures.ThreadPoolExecutor(len(ks)) as pool:
+            replies = list(pool.map(lambda k: api("POST", f"/api/runs/{run_id}/results", dict(FAST, k=k)), ks))
+        self.assertEqual([s for s, _ in replies], [201] * len(ks))
+        results = [b["data"] for _, b in replies]
+        outcomes = sorted(r["metrics"]["cache"]["graph"] for r in results)
+        self.assertEqual(outcomes.count("miss"), 1, outcomes)
+        self.assertTrue(set(outcomes) <= {"miss", "hit", "shared"})
+        after = api("GET", "/api/cache")[1]["data"]
+        self.assertEqual(after["misses"] - before["misses"], 1)
+        self.assertEqual(self.count("results", f"run_id = '{run_id}'"), len(ks))
+        # Each concurrent result equals a sequential cold computation with its own k.
+        self.clear_cache()
+        for r in results[:2]:
+            cold = self.compute(run_id, dict(FAST, k=r["params"]["k"]))
+            self.assertEqual(engine_output(r["metrics"]), engine_output(cold["metrics"]))
+
+    def test_8d_fixed_parameters_are_rejected(self):
+        run_id = self.new_run()
+        for field, value in (("seed", 7), ("sigma_color", 8), ("spatial_scale", 0)):
+            status, body = api("POST", f"/api/runs/{run_id}/results", dict(FAST, **{field: value}))
+            self.assertEqual((status, body["error"]["code"], body["error"]["details"]["field"]),
+                             (400, "invalid_parameter", field))
+        params = self.compute(run_id, FAST)["params"]  # the fixed values are still recorded
+        self.assertEqual((params["seed"], params["sigma_color"], params["spatial_scale"]), (42, 5.0, 2.0))
+
+    def lru_scenario(self, *server_args):
+        small = Server(PG.url, *server_args)
+        small.start()
+        try:
+            base = small.base
+            run_id = self.new_run()
+            for s in (400, 500, 600):
+                r = self.compute(run_id, dict(FAST, superpixels=s), base=base)
+                self.assertEqual(r["metrics"]["cache"]["graph"], "miss")
+            stats = api("GET", "/api/cache", base=base)[1]["data"]
+            self.assertEqual(stats["entries"], 2)
+            self.assertEqual(stats["evictions"], 1)
+            self.assertLessEqual(stats["bytes"], stats["capacity_bytes"])
+            self.assertEqual(self.compute(run_id, dict(FAST, superpixels=600), base=base)["metrics"]["cache"]["graph"],
+                             "hit")
+            self.assertEqual(self.compute(run_id, dict(FAST, superpixels=400), base=base)["metrics"]["cache"]["graph"],
+                             "miss")  # least recently used, evicted first
+        finally:
+            self.assertEqual(small.stop(), 0)
+
+    def test_8e_holds_at_most_n_graphs(self):
+        self.lru_scenario("--cache-graphs", "2", "--cache-mb", "1024")
+
+    def test_8f_byte_cap_also_bounds_the_cache(self):
+        # A ~1.4 MB graph per request (387x516 image + labels): 3 MB holds two.
+        self.lru_scenario("--cache-graphs", "100", "--cache-mb", "3")
+
+    # 9 ---------------------------------------------------------------------------------------
+    def test_9_clear_history_deletes_saved_results_only(self):
+        run_id = self.new_run()
+        saved = [self.compute(run_id, dict(FAST, k=k))["result_id"] for k in (4, 5)]
+        unsaved = self.compute(run_id, dict(FAST, k=6))["result_id"]
+        for rid in saved:
+            self.assertEqual(self.save(rid)[0], 201)
+        total_saved = self.count("results", "saved_at IS NOT NULL")
+        runs = self.count("runs")
+
+        status, body = api("DELETE", "/api/experiments")
+        self.assertEqual((status, body["data"]["deleted"]), (200, total_saved))
+        self.assertEqual(api("GET", "/api/experiments")[1]["data"]["count"], 0)
+        for rid in saved:
+            self.assertEqual(api("GET", f"/api/results/{rid}")[0], 404)
+            self.assertEqual(self.save(rid)[0], 404)
+        self.assertEqual(api("GET", f"/api/results/{unsaved}")[0], 200)  # unsaved results stay
+        self.assertEqual(api("GET", f"/api/runs/{run_id}")[1]["data"]["result_ids"], [unsaved])
+        self.assertEqual(self.count("runs"), runs)
+        self.assertEqual(api("DELETE", "/api/experiments")[1]["data"]["deleted"], 0)  # idempotent
+        # The graph cache is independent of the log: the same graph is still cached.
+        self.assertEqual(self.compute(run_id, dict(FAST, k=7))["metrics"]["cache"]["graph"], "hit")
 
 
 if __name__ == "__main__":

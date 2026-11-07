@@ -2,6 +2,8 @@
 #include <csignal>
 #include <cstddef>
 #include <cstdlib>
+#include <fstream>
+#include <iterator>
 #include <iostream>
 #include <stdexcept>
 #include <string>
@@ -11,6 +13,7 @@
 
 #include "api/routes.hpp"
 #include "db/database.hpp"
+#include "graph_cache.hpp"
 
 #include <httplib.h>
 
@@ -33,6 +36,10 @@ int main(int argc, char** argv) {
     std::string db_url = env_db ? env_db : "";
     std::size_t db_pool = 4;
     int db_wait_s = 30;
+    std::size_t cache_graphs = 8;
+    std::size_t cache_mb = 1024;
+    const char* env_web = std::getenv("SEG_WEB_ROOT");
+    std::string web_root = env_web ? env_web : "";
     try {
         for (int i = 1; i < argc; i += 2) {
             const std::string arg = argv[i];
@@ -43,12 +50,23 @@ int main(int argc, char** argv) {
             else if (arg == "--db") db_url = v;
             else if (arg == "--db-pool") db_pool = std::stoul(v);
             else if (arg == "--db-wait") db_wait_s = std::stoi(v);
+            else if (arg == "--cache-graphs") {
+                const long long n = std::stoll(v);
+                if (n < 0 || n > 10000) throw std::invalid_argument("--cache-graphs must be in [0, 10000]");
+                cache_graphs = static_cast<std::size_t>(n);
+            } else if (arg == "--cache-mb") {
+                const long long mb = std::stoll(v);
+                if (mb < 0 || mb > (1LL << 20)) throw std::invalid_argument("--cache-mb must be in [0, 1048576]");
+                cache_mb = static_cast<std::size_t>(mb);
+            }
+            else if (arg == "--web-root") web_root = v;
             else throw std::invalid_argument("unknown option " + arg);
         }
         if (db_url.empty()) throw std::invalid_argument("no database: pass --db URL or set SEG_DATABASE_URL");
     } catch (const std::exception& e) {
         std::cerr << "error: " << e.what() << "\n"
-                  << "usage: seg_server [--host H] [--port P] [--db URL] [--db-pool N] [--db-wait SECONDS]\n";
+                  << "usage: seg_server [--host H] [--port P] [--db URL] [--db-pool N] [--db-wait SECONDS]\n"
+                     "                  [--cache-graphs N (0 = off)] [--cache-mb MB safety cap] [--web-root DIR]\n";
         return 1;
     }
 
@@ -92,8 +110,23 @@ int main(int argc, char** argv) {
     sigaction(SIGINT, &action, nullptr);
     sigaction(SIGTERM, &action, nullptr);
 
+    seg::GraphCache cache(cache_graphs, cache_mb << 20);
     httplib::Server server;
-    seg::api::register_routes(server, db, limits);
+    seg::api::register_routes(server, db, cache, limits);
+    // The built React app, served from the same origin as the API (no CORS needed). Only
+    // /assets is a file mount: httplib checks mounts before routes on every GET, so mounting
+    // "/" would make each API request look for a file first and let a file shadow a route.
+    if (!web_root.empty()) {
+        std::ifstream index_file(web_root + "/index.html", std::ios::binary);
+        if (!index_file || !server.set_mount_point("/assets", web_root + "/assets")) {
+            std::cerr << "error: --web-root " << web_root << " needs index.html and assets/\n";
+            return 1;
+        }
+        const std::string index((std::istreambuf_iterator<char>(index_file)), std::istreambuf_iterator<char>());
+        server.Get("/", [index](const httplib::Request&, httplib::Response& res) {
+            res.set_content(index, "text/html; charset=utf-8");
+        });
+    }
     server.set_logger([](const httplib::Request& req, const httplib::Response& res) {
         std::cout << req.method << " " << req.path << " " << res.status << std::endl;
     });

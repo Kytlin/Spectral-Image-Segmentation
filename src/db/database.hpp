@@ -101,6 +101,8 @@ public:
 
     // Sets saved_at only if it is still NULL, so repeated saves keep the first timestamp.
     SaveReply save_result(const std::string& id);
+    // Deletes every saved result; returns how many. Unsaved results are kept.
+    std::size_t delete_saved();
     // Saved results, most recently saved first; run_id optionally restricts to one run.
     std::vector<ResultRecord> list_saved(int limit, const std::optional<std::string>& run_id);
 
