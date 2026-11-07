@@ -39,6 +39,30 @@ add_library(Spectra::Spectra ALIAS spectra)
 target_include_directories(spectra SYSTEM INTERFACE ${spectra_SOURCE_DIR}/include)
 target_link_libraries(spectra INTERFACE Eigen3::Eigen)
 
+# HTTP server and JSON for the API: header-only, same versions as the original repository.
+FetchContent_Declare(httplib
+  URL https://github.com/yhirose/cpp-httplib/archive/refs/tags/v0.18.3.tar.gz
+  URL_HASH SHA256=a0567bcd6c3fe5cef1b329b96245119047f876b49e06cc129a36a7a8dffe173e
+  DOWNLOAD_EXTRACT_TIMESTAMP TRUE)
+FetchContent_Declare(nlohmann_json
+  URL https://github.com/nlohmann/json/releases/download/v3.11.3/json.tar.xz
+  URL_HASH SHA256=d6c65aca6b1ed68e7a182f4757257b107ae403032760ed6ef121c9d55e81757d
+  DOWNLOAD_EXTRACT_TIMESTAMP TRUE)
+FetchContent_GetProperties(httplib)
+if(NOT httplib_POPULATED)
+  FetchContent_Populate(httplib)
+endif()
+FetchContent_GetProperties(nlohmann_json)
+if(NOT nlohmann_json_POPULATED)
+  FetchContent_Populate(nlohmann_json)
+endif()
+find_package(Threads REQUIRED)
+add_library(httplib INTERFACE)
+target_include_directories(httplib SYSTEM INTERFACE ${httplib_SOURCE_DIR})
+target_link_libraries(httplib INTERFACE Threads::Threads)
+add_library(nlohmann_json INTERFACE)
+target_include_directories(nlohmann_json SYSTEM INTERFACE ${nlohmann_json_SOURCE_DIR}/single_include)
+
 # Warning flags shared by every target we own.
 add_library(seg_warnings INTERFACE)
 target_compile_options(seg_warnings INTERFACE
@@ -56,6 +80,15 @@ target_link_libraries(segcore PUBLIC Eigen3::Eigen Spectra::Spectra ${OpenCV_LIB
 
 add_executable(segment apps/segment.cpp)
 target_link_libraries(segment PRIVATE segcore seg_warnings)
+
+# ---- HTTP API -----------------------------------------------------------------------------
+# In-memory run/result store, JSON codec, and HTTP routes around seg::segment().
+add_library(segapi STATIC src/api/run_store.cpp src/api/codec.cpp src/api/routes.cpp)
+target_include_directories(segapi PUBLIC src)
+target_link_libraries(segapi PUBLIC segcore nlohmann_json httplib PRIVATE seg_warnings)
+
+add_executable(seg_server apps/server.cpp)
+target_link_libraries(seg_server PRIVATE segapi seg_warnings)
 
 # ---- Tests --------------------------------------------------------------------------------
 if(SEG_BUILD_TESTS)

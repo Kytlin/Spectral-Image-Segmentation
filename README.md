@@ -118,12 +118,44 @@ eigenvectors are accurate and any segmentation errors come from the method, not 
 | 3005 (default) | 80 (cap) | 797 |
 
 
+## HTTP API
+
+```bash
+docker run --rm -p 8080:8080 --entrypoint seg_server spectral-seg   # or ./build/seg_server [--port P]
+
+curl -F image=@data/downtown_toronto.jpeg localhost:8080/api/runs                # -> run_id
+curl -H 'Content-Type: application/json' -d '{"k": 6, "method": "flat", "superpixels": 400}' \
+     localhost:8080/api/runs/RUN_ID/results                                      # -> result_id + metrics
+curl localhost:8080/api/results/RESULT_ID
+curl -o seg.png localhost:8080/api/results/RESULT_ID/images/segmentation
+```
+
+| Endpoint | Success |
+|---|---|
+| `GET /api/health` | 200 |
+| `POST /api/runs` (multipart field `image`, ≤ 20 MB, ≤ 40 MP) | 201 run |
+| `GET /api/runs/{run_id}` | 200 run with `result_ids` |
+| `POST /api/runs/{run_id}/results` (JSON; `k` required) | 201 result: `params` + `metrics` |
+| `GET /api/results/{result_id}` | 200 result |
+| `GET /api/results/{result_id}/images/{original\|superpixels\|segmentation\|boundaries}` | 200 PNG |
+
+Result parameters are `k`, `method`, `superpixels`, `ncut_threshold`, `sigma_color`, `spatial_scale`,
+`blur_sigma`, `max_dim` and `seed`. Each has the same meaning and default as the CLI flag. Success
+responses are `{"data": ...}`. Errors are `{"error": {"code", "message", "details"?}}`, with status 400
+(bad JSON or parameter), 404 (unknown ID or route), 413 (too large), 415 (wrong content type or
+undecodable image), 422 (the engine rejected the input, e.g. `k` above the superpixel count), 503
+(store full) or 500. Runs and results live in memory only, and a restart drops them.
+
 ## Layout
 
 ```
 src/region_graph.*   superpixel graph (features, adjacency, affinity W)
 src/spectral.*       NJW: normalized affinity, Spectra eigenpairs, k-means++, recursive splitting
 src/segmenter.*      public entry point seg::segment(), rendering, image discovery
+src/api/run_store.*  in-memory runs/results (UUIDs, one mutex)
+src/api/codec.*      request validation and JSON serialization
+src/api/routes.*     HTTP handlers (cpp-httplib)
 apps/segment.cpp     CLI (run, bench)
+apps/server.cpp      HTTP server entry point
 tests/               GoogleTest correctness tests
 ```
