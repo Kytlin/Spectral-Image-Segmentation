@@ -1,6 +1,6 @@
 # Spectral Image Segmentation
 
-[**Watch Demo Video**](img_seg_demo.mp4)
+https://github.com/user-attachments/assets/4e68bee6-4768-48dd-ba7b-cff9907dab71
 
 A C++17 spectral clustering engine with a React frontend and PostgreSQL-backed HTTP API. It partitions images into colour- and spatially coherent regions using sparse graph methods and numerical linear algebra.
 
