@@ -8,7 +8,7 @@ The application supports interactive segmentation, caching of expensive graph co
 
 ## How to run
 
-Run `docker compose up --build` in terminal and then go to http://localhost:8080 on web browser.
+Run `docker compose up --build` in terminal and then go to http://localhost:8080 on web browser once build is finished. To start the app from its current state after exiting, run `docker compose up`.
 
 ## Algorithm
 
